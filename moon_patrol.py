@@ -594,6 +594,8 @@ class Player:
         self.wheel_offsets = [(6, VEHICLE_H - 4), (VEHICLE_W - 11, VEHICLE_H - 4)]
         self.tilt = 0.0  # body tilt angle
         self.fire_rate_boost = 0  # frames remaining for rapid-fire
+        self.spread_shot = 0     # frames remaining for spread shot
+        self.cyan_coins = 0      # cyan coins collected toward next spread activation
         self.dead = False
         self.dead_timer = 0
 
@@ -671,15 +673,21 @@ class Player:
         self.shoot_cooldown -= 1
         if self.fire_rate_boost > 0:
             self.fire_rate_boost -= 1
+        if self.spread_shot > 0:
+            self.spread_shot -= 1
         shoot_cd = 13 if self.fire_rate_boost > 0 else 18
         if (keys[pygame.K_LCTRL] or keys[pygame.K_z] or keys[pygame.K_x]) and self.shoot_cooldown <= 0:
             self.shoot_cooldown = shoot_cd
-            # Fire diagonally up-right
             bx = self.x + VEHICLE_W
             by = self.y + VEHICLE_H // 3
             bullets.append(Bullet(bx, by, LASER_SPEED, -LASER_SPEED * 0.5, LASER_BLUE, 'player'))
-            # Also fire straight right
             bullets.append(Bullet(bx, by + 6, LASER_SPEED, 0, LASER_BLUE, 'player'))
+            if self.spread_shot > 0:
+                # Extra bullet 5° below straight right
+                a = math.radians(5)
+                bullets.append(Bullet(bx, by + 6,
+                                      LASER_SPEED * math.cos(a), LASER_SPEED * math.sin(a),
+                                      CYAN, 'player'))
             SND_SHOOT.play()
 
     def hit(self):
@@ -845,6 +853,13 @@ def draw_hud(surf, player, camera_x, level_length):
     if player.fire_rate_boost > 0:
         secs = math.ceil(player.fire_rate_boost / 60)
         surf.blit(FONT_TINY.render(f"RAPID FIRE  {secs}s", True, RED), (SCREEN_W - 160, 8))
+
+    # Spread-shot indicator / cyan coin progress
+    if player.spread_shot > 0:
+        secs = math.ceil(player.spread_shot / 60)
+        surf.blit(FONT_TINY.render(f"SPREAD  {secs}s", True, CYAN), (SCREEN_W - 160, 22))
+    elif player.cyan_coins > 0:
+        surf.blit(FONT_TINY.render(f"SPREAD  {'o' * player.cyan_coins}{'.' * (3 - player.cyan_coins)}", True, CYAN), (SCREEN_W - 160, 22))
 
     # Controls reminder
     surf.blit(FONT_TINY.render("ARROWS/WASD:MOVE  SPACE:JUMP  LMB:FIRE", True, GRAY), (10, SCREEN_H - 18))
@@ -1013,7 +1028,16 @@ def game_loop():
             dx = mouse_pos[0] - bx
             dy = mouse_pos[1] - by
             dist = max(1, math.sqrt(dx * dx + dy * dy))
-            bullets.append(Bullet(bx, by, dx / dist * LASER_SPEED, dy / dist * LASER_SPEED, LASER_BLUE, 'player'))
+            ndx, ndy = dx / dist, dy / dist
+            bullets.append(Bullet(bx, by, ndx * LASER_SPEED, ndy * LASER_SPEED, LASER_BLUE, 'player'))
+            if player.spread_shot > 0:
+                # Rotate aim direction by 5° for extra bullet
+                a = math.radians(5)
+                ca, sa = math.cos(a), math.sin(a)
+                bullets.append(Bullet(bx, by,
+                                      (ndx * ca - ndy * sa) * LASER_SPEED,
+                                      (ndx * sa + ndy * ca) * LASER_SPEED,
+                                      CYAN, 'player'))
             SND_SHOOT.play()
 
         # Check win
@@ -1094,6 +1118,11 @@ def game_loop():
                 c.alive = False
                 if c.color == RED:
                     player.fire_rate_boost = max(player.fire_rate_boost, 600)
+                elif c.color == CYAN:
+                    player.cyan_coins += 1
+                    if player.cyan_coins >= 3:
+                        player.cyan_coins = 0
+                        player.spread_shot = max(player.spread_shot, 600)
                 player.score += 100
         coins[:] = [c for c in coins if c.alive]
 
