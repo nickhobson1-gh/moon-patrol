@@ -6,6 +6,7 @@ import sys
 import math
 import random
 import array
+import os
 
 pygame.init()
 pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
@@ -32,6 +33,7 @@ PURPLE  = (160, 40, 220)
 MAGENTA = (220, 40, 180)
 BROWN   = (140, 80, 40)
 TAN     = (180, 140, 80)
+LASER_BLUE   = (55, 150, 210)
 MOON_SURFACE = (180, 170, 140)
 MOON_DARK    = (120, 110, 90)
 MOON_SHADOW  = (80, 75, 60)
@@ -44,12 +46,28 @@ SCROLL_SPEED  = 3.0
 PLAYER_SPEED  = 2.5
 JUMP_VEL      = -10
 BULLET_SPEED  = 8
+LASER_SPEED   = BULLET_SPEED * 1.3 * 1.3
 ALIEN_BULLET_SPEED = 4
 LEVEL_LENGTH  = 12000   # pixels of terrain to generate
 
 screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
 pygame.display.set_caption("MOON PATROL")
 clock = pygame.time.Clock()
+
+# ─────────────────────────────────────────────
+# FONTS  (PressStart2P — 1980s arcade style)
+# ─────────────────────────────────────────────
+_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'PressStart2P-Regular.ttf')
+try:
+    FONT_LG   = pygame.font.Font(_FONT_PATH, 22)
+    FONT_MD   = pygame.font.Font(_FONT_PATH, 13)
+    FONT_SM   = pygame.font.Font(_FONT_PATH, 10)
+    FONT_TINY = pygame.font.Font(_FONT_PATH, 7)
+except Exception:
+    FONT_LG   = pygame.font.SysFont("monospace", 48, bold=True)
+    FONT_MD   = pygame.font.SysFont("monospace", 24, bold=True)
+    FONT_SM   = pygame.font.SysFont("monospace", 16, bold=True)
+    FONT_TINY = pygame.font.SysFont("monospace", 11, bold=True)
 
 # ─────────────────────────────────────────────
 # SOUND SYNTHESIS (modern sounds, programmatic)
@@ -179,7 +197,7 @@ def gen_win_sound():
     return make_sound(samples)
 
 # Pre-generate sounds
-SND_SHOOT    = gen_shoot_sound()
+SND_SHOOT    = pygame.mixer.Sound('/Users/nickhobson/Claude/gridrunner/data/spo.wav')
 SND_EXPLODE  = gen_explosion_sound()
 SND_ALIEN_SHOOT = gen_alien_shoot_sound()
 SND_JUMP     = gen_jump_sound()
@@ -189,7 +207,7 @@ SND_WIN      = gen_win_sound()
 # ─────────────────────────────────────────────
 # TERRAIN GENERATION
 # ─────────────────────────────────────────────
-TERRAIN_GROUND_Y = 420  # baseline y on screen
+TERRAIN_GROUND_Y = 492  # baseline y on screen
 TERRAIN_RESOLUTION = 4  # pixels per terrain sample
 
 def generate_terrain(length):
@@ -379,17 +397,44 @@ class Bullet:
         self.owner = owner
         self.alive = True
         self.w, self.h = 6, 3
+        self.trail = []
+        self.max_trail = 6 if owner == 'player' else 0
 
     def update(self):
+        if self.max_trail:
+            self.trail.append((self.x, self.y))
+            if len(self.trail) > self.max_trail:
+                self.trail.pop(0)
         self.x += self.vx
         self.y += self.vy
         if self.x > SCREEN_W + 50 or self.x < -50 or self.y < -50 or self.y > SCREEN_H + 50:
             self.alive = False
 
     def draw(self, surf):
-        pygame.draw.rect(surf, self.color, (int(self.x), int(self.y), self.w, self.h))
-        # Glow
-        pygame.draw.rect(surf, WHITE, (int(self.x)+1, int(self.y)+1, self.w-2, 1))
+        if self.owner == 'player':
+            self._draw_laser(surf)
+        else:
+            pygame.draw.rect(surf, self.color, (int(self.x), int(self.y), self.w, self.h))
+            pygame.draw.rect(surf, WHITE, (int(self.x)+1, int(self.y)+1, self.w-2, 1))
+
+    def _draw_laser(self, surf):
+        all_pts = self.trail + [(self.x, self.y)]
+        n = len(all_pts)
+        if n >= 2:
+            for i in range(n - 1):
+                t = (i + 1) / n  # 0=oldest/dim, 1=newest/bright
+                x1 = int(all_pts[i][0] + self.w // 2)
+                y1 = int(all_pts[i][1] + self.h // 2)
+                x2 = int(all_pts[i+1][0] + self.w // 2)
+                y2 = int(all_pts[i+1][1] + self.h // 2)
+                # Outer glow — fades to black at tail
+                pygame.draw.line(surf,
+                    (int(10 * t), int(40 * t), int(85 * t)),
+                    (x1, y1), (x2, y2), 6)
+                # Core beam — fades to black at tail
+                pygame.draw.line(surf,
+                    (int(self.color[0] * t), int(self.color[1] * t), int(self.color[2] * t)),
+                    (x1, y1), (x2, y2), 2)
 
 class Bomb:
     def __init__(self, x, y):
@@ -401,7 +446,7 @@ class Bomb:
         self.w, self.h = 6, 8
 
     def update(self, terrain_heights, camera_x):
-        self.vy += GRAVITY * 0.8
+        self.vy += GRAVITY * 0.4
         self.x += self.vx
         self.y += self.vy
         # Check ground collision
@@ -418,15 +463,58 @@ class Bomb:
         pygame.draw.line(surf, YELLOW, (int(self.x)+3, int(self.y)),
                          (int(self.x)+3, int(self.y)-5), 2)
 
+class Coin:
+    def __init__(self, world_x, world_y, color):
+        self.world_x = float(world_x)
+        self.world_y = float(world_y)
+        self.vx = random.uniform(-2, 2)
+        self.vy = random.uniform(-5, -2)
+        self.color = color
+        self.alive = True
+        self.settled = False
+        self.r = 6
+        self.lifetime = 420  # 7 seconds
+
+    def update(self, terrain_heights, camera_x):
+        self.lifetime -= 1
+        if self.lifetime <= 0:
+            self.alive = False
+            return
+        if not self.settled:
+            self.vy += GRAVITY * 0.8
+            self.world_x += self.vx
+            self.world_y += self.vy
+            tidx = max(0, min(int(self.world_x / TERRAIN_RESOLUTION), len(terrain_heights)-1))
+            if self.world_y + self.r >= terrain_heights[tidx]:
+                self.world_y = terrain_heights[tidx] - self.r
+                self.vy = 0
+                self.vx = 0
+                self.settled = True
+        sx = self.world_x - camera_x
+        if sx < -60 or sx > SCREEN_W + 60:
+            self.alive = False
+
+    def draw(self, surf, camera_x):
+        sx = int(self.world_x - camera_x)
+        sy = int(self.world_y)
+        if -10 < sx < SCREEN_W + 10:
+            pygame.draw.circle(surf, self.color, (sx, sy), self.r)
+            shine = tuple(min(255, c + 90) for c in self.color)
+            pygame.draw.circle(surf, shine, (sx - 2, sy - 2), 2)
+            pygame.draw.circle(surf, WHITE, (sx, sy), self.r, 1)
+
 class Alien:
     TYPES = ['swooper', 'hoverer', 'diver']
+    _COLORS = [RED, PURPLE, CYAN]
 
     def __init__(self, screen_x, world_x):
         self.world_x = world_x
         self.screen_x = screen_x
         self.y = random.randint(80, 200)
         self.type = random.choice(self.TYPES)
-        self.surf = random.choice(ALIEN_SURFS)
+        color_idx = random.randint(0, 2)
+        self.surf = ALIEN_SURFS[color_idx]
+        self.coin_color = self._COLORS[color_idx]
         self.w = self.surf.get_width()
         self.h = self.surf.get_height()
         self.alive = True
@@ -435,7 +523,7 @@ class Alien:
         self.bomb_timer = random.randint(90, 240)
         self.anim_t = random.uniform(0, 100)
         # Movement
-        self.vx = random.uniform(-1.5, -0.5)
+        self.vx = random.uniform(-1.5, -0.5) * 0.7
         self.base_y = self.y
         self.flash_timer = 0
 
@@ -505,6 +593,7 @@ class Player:
         # Wheel offsets from vehicle bottom-left
         self.wheel_offsets = [(6, VEHICLE_H - 4), (VEHICLE_W - 11, VEHICLE_H - 4)]
         self.tilt = 0.0  # body tilt angle
+        self.fire_rate_boost = 0  # frames remaining for rapid-fire
         self.dead = False
         self.dead_timer = 0
 
@@ -580,25 +669,25 @@ class Player:
 
         # Shoot (up-right)
         self.shoot_cooldown -= 1
+        if self.fire_rate_boost > 0:
+            self.fire_rate_boost -= 1
+        shoot_cd = 13 if self.fire_rate_boost > 0 else 18
         if (keys[pygame.K_LCTRL] or keys[pygame.K_z] or keys[pygame.K_x]) and self.shoot_cooldown <= 0:
-            self.shoot_cooldown = 18
+            self.shoot_cooldown = shoot_cd
             # Fire diagonally up-right
             bx = self.x + VEHICLE_W
             by = self.y + VEHICLE_H // 3
-            bullets.append(Bullet(bx, by, BULLET_SPEED, -BULLET_SPEED * 0.5, YELLOW, 'player'))
+            bullets.append(Bullet(bx, by, LASER_SPEED, -LASER_SPEED * 0.5, LASER_BLUE, 'player'))
             # Also fire straight right
-            bullets.append(Bullet(bx, by + 6, BULLET_SPEED, 0, CYAN, 'player'))
+            bullets.append(Bullet(bx, by + 6, LASER_SPEED, 0, LASER_BLUE, 'player'))
             SND_SHOOT.play()
 
     def hit(self):
         if self.invincible > 0:
             return False
-        self.lives -= 1
+        self.lives = max(0, self.lives - 1)
         self.invincible = 90
         SND_HIT.play()
-        if self.lives <= 0:
-            self.dead = True
-            self.dead_timer = 120
         return True
 
     def draw(self, surf, terrain_heights, camera_x):
@@ -740,23 +829,50 @@ def draw_sky(surf, camera_x):
 # HUD
 # ─────────────────────────────────────────────
 def draw_hud(surf, player, camera_x, level_length):
-    # Score
-    font = pygame.font.SysFont("monospace", 18, bold=True)
-    surf.blit(font.render(f"SCORE: {player.score:06d}", True, YELLOW), (10, 8))
-    surf.blit(font.render(f"LIVES: {'* ' * player.lives}", True, CYAN), (10, 28))
+    surf.blit(FONT_SM.render(f"SCORE: {player.score:06d}", True, YELLOW), (10, 8))
+    surf.blit(FONT_SM.render(f"LIVES: {'* ' * player.lives}", True, CYAN), (10, 26))
 
     # Progress bar
     progress = min(1.0, camera_x / (level_length - SCREEN_W))
-    bar_w = 300
+    bar_w = 260
     bar_x = SCREEN_W//2 - bar_w//2
-    pygame.draw.rect(surf, DKGRAY, (bar_x, 10, bar_w, 12))
-    pygame.draw.rect(surf, GREEN, (bar_x, 10, int(bar_w * progress), 12))
-    pygame.draw.rect(surf, WHITE, (bar_x, 10, bar_w, 12), 1)
-    surf.blit(font.render("CHECKPOINT", True, WHITE), (bar_x + bar_w + 8, 6))
+    pygame.draw.rect(surf, DKGRAY, (bar_x, 10, bar_w, 10))
+    pygame.draw.rect(surf, GREEN, (bar_x, 10, int(bar_w * progress), 10))
+    pygame.draw.rect(surf, WHITE, (bar_x, 10, bar_w, 10), 1)
+    surf.blit(FONT_TINY.render("CHECKPOINT", True, WHITE), (bar_x + bar_w + 8, 8))
 
-    # Controls reminder (small)
-    small = pygame.font.SysFont("monospace", 11, bold=True)
-    surf.blit(small.render("ARROWS/WASD: MOVE  SPACE: JUMP  CTRL/Z: FIRE", True, GRAY), (10, SCREEN_H-20))
+    # Rapid-fire indicator
+    if player.fire_rate_boost > 0:
+        secs = math.ceil(player.fire_rate_boost / 60)
+        surf.blit(FONT_TINY.render(f"RAPID FIRE  {secs}s", True, RED), (SCREEN_W - 160, 8))
+
+    # Controls reminder
+    surf.blit(FONT_TINY.render("ARROWS/WASD:MOVE  SPACE:JUMP  LMB:FIRE", True, GRAY), (10, SCREEN_H - 18))
+
+# ─────────────────────────────────────────────
+# CROSSHAIR
+# ─────────────────────────────────────────────
+def draw_crosshair(surf, pos):
+    x, y = int(pos[0]), int(pos[1])
+    size = 14
+    gap = 5
+    color = YELLOW
+    outline = BLACK
+    thickness = 2
+    # Outline for visibility
+    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        pygame.draw.line(surf, outline, (x - size + dx, y + dy), (x - gap + dx, y + dy), thickness)
+        pygame.draw.line(surf, outline, (x + gap + dx, y + dy), (x + size + dx, y + dy), thickness)
+        pygame.draw.line(surf, outline, (x + dx, y - size + dy), (x + dx, y - gap + dy), thickness)
+        pygame.draw.line(surf, outline, (x + dx, y + gap + dy), (x + dx, y + size + dy), thickness)
+    # Main crosshair lines
+    pygame.draw.line(surf, color, (x - size, y), (x - gap, y), thickness)
+    pygame.draw.line(surf, color, (x + gap, y), (x + size, y), thickness)
+    pygame.draw.line(surf, color, (x, y - size), (x, y - gap), thickness)
+    pygame.draw.line(surf, color, (x, y + gap), (x, y + size), thickness)
+    # Center dot
+    pygame.draw.circle(surf, outline, (x, y), 3)
+    pygame.draw.circle(surf, color, (x, y), 2)
 
 # ─────────────────────────────────────────────
 # FINISH LINE
@@ -772,16 +888,15 @@ def draw_finish(surf, finish_screen_x, terrain_heights, camera_x):
         for col in range(4):
             color = WHITE if (row+col) % 2 == 0 else BLACK
             pygame.draw.rect(surf, color, (int(finish_screen_x)+3+col*8, gy-80+row*8, 8, 8))
-    font = pygame.font.SysFont("monospace", 20, bold=True)
     c = [YELLOW, CYAN, GREEN, ORANGE, WHITE][t % 5]
-    surf.blit(font.render("FINISH!", True, c), (int(finish_screen_x)-20, gy-110))
+    surf.blit(FONT_MD.render("FINISH!", True, c), (int(finish_screen_x)-30, gy-110))
 
 # ─────────────────────────────────────────────
 # ALIEN SPAWNER
 # ─────────────────────────────────────────────
 class AlienSpawner:
     def __init__(self):
-        self.spawn_timer = 180
+        self.spawn_timer = 234  # 180 * 1.3
         self.wave = 0
 
     def update(self, aliens, camera_x):
@@ -792,7 +907,7 @@ class AlienSpawner:
             for _ in range(min(count, 3)):
                 aliens.append(Alien(SCREEN_W + random.randint(0, 100),
                                     camera_x + SCREEN_W + random.randint(0, 200)))
-            self.spawn_timer = max(90, 240 - self.wave * 10)
+            self.spawn_timer = max(117, int((240 - self.wave * 10) * 1.3))
 
 # ─────────────────────────────────────────────
 # MAIN GAME LOOP
@@ -804,6 +919,7 @@ def game_loop():
     bullets = []
     bombs = []
     aliens = []
+    coins = []
     particles = []
     spawner = AlienSpawner()
 
@@ -816,12 +932,13 @@ def game_loop():
     for y in range(0, SCREEN_H, 2):
         pygame.draw.line(scanline_surf, (0, 0, 0, 40), (0, y), (SCREEN_W, y))
 
-    font_big = pygame.font.SysFont("monospace", 48, bold=True)
-    font_med = pygame.font.SysFont("monospace", 24, bold=True)
-    font_sml = pygame.font.SysFont("monospace", 16, bold=True)
+    font_big = FONT_LG
+    font_med = FONT_MD
 
     show_title = True
     title_timer = 0
+
+    pygame.mouse.set_visible(False)
 
     running = True
     while running:
@@ -849,7 +966,7 @@ def game_loop():
             screen.blit(t1, (SCREEN_W//2 - t1.get_width()//2, 180))
             t2 = font_med.render("REACH THE FINISH LINE!", True, WHITE)
             screen.blit(t2, (SCREEN_W//2 - t2.get_width()//2, 260))
-            t3 = font_sml.render("ARROWS/WASD: Move   SPACE: Jump   CTRL/Z: Fire", True, GRAY)
+            t3 = FONT_TINY.render("ARROWS/WASD  SPACE:JUMP  LMB:FIRE", True, GRAY)
             screen.blit(t3, (SCREEN_W//2 - t3.get_width()//2, 310))
             t4 = font_med.render("PRESS ENTER TO START", True, [WHITE,YELLOW][(title_timer//30)%2])
             screen.blit(t4, (SCREEN_W//2 - t4.get_width()//2, 380))
@@ -886,6 +1003,19 @@ def game_loop():
         # Update player
         player.update(keys, terrain_heights, camera_x, bullets)
 
+        # Mouse firing toward crosshair
+        mouse_pos = pygame.mouse.get_pos()
+        mouse_buttons = pygame.mouse.get_pressed()
+        if mouse_buttons[0] and player.shoot_cooldown <= 0 and not player.dead:
+            player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
+            bx = player.x + VEHICLE_W
+            by = player.y + VEHICLE_H // 3
+            dx = mouse_pos[0] - bx
+            dy = mouse_pos[1] - by
+            dist = max(1, math.sqrt(dx * dx + dy * dy))
+            bullets.append(Bullet(bx, by, dx / dist * LASER_SPEED, dy / dist * LASER_SPEED, LASER_BLUE, 'player'))
+            SND_SHOOT.play()
+
         # Check win
         finish_screen_x = FINISH_WORLD_X - camera_x
         if finish_screen_x < player.x + VEHICLE_W + 10:
@@ -893,10 +1023,6 @@ def game_loop():
             SND_WIN.play()
             continue
 
-        # Check player dead
-        if player.dead and player.dead_timer <= 0:
-            game_over = True
-            continue
 
         # Spawner
         spawner.update(aliens, camera_x)
@@ -942,6 +1068,11 @@ def game_loop():
                             for _ in range(20):
                                 particles.append(Particle(alien.screen_x + alien.w//2,
                                                           alien.y + alien.h//2))
+                            for _ in range(random.randint(2, 4)):
+                                coins.append(Coin(
+                                    alien.screen_x + camera_x + alien.w//2 + random.uniform(-12, 12),
+                                    alien.y + alien.h//2,
+                                    alien.coin_color))
                         break
 
         # Bomb collision with player
@@ -952,6 +1083,19 @@ def game_loop():
                 player.hit()
                 for _ in range(12):
                     particles.append(Particle(player.x + VEHICLE_W//2, player.y + VEHICLE_H//2))
+
+        # Coins
+        for c in coins:
+            c.update(terrain_heights, camera_x)
+        player_rect = pygame.Rect(player.x, player.y, VEHICLE_W, VEHICLE_H)
+        for c in coins:
+            cr = pygame.Rect(c.world_x - camera_x - c.r, c.world_y - c.r, c.r * 2, c.r * 2)
+            if c.alive and player_rect.colliderect(cr):
+                c.alive = False
+                if c.color == RED:
+                    player.fire_rate_boost = max(player.fire_rate_boost, 600)
+                player.score += 100
+        coins[:] = [c for c in coins if c.alive]
 
         # Particles
         for p in particles:
@@ -967,6 +1111,10 @@ def game_loop():
         # Finish line
         if finish_screen_x < SCREEN_W + 100:
             draw_finish(screen, finish_screen_x, terrain_heights, camera_x)
+
+        # Draw coins
+        for c in coins:
+            c.draw(screen, camera_x)
 
         # Draw bombs
         for bm in bombs:
@@ -992,6 +1140,9 @@ def game_loop():
 
         # Scanlines
         screen.blit(scanline_surf, (0, 0))
+
+        # Crosshair (drawn on top of everything)
+        draw_crosshair(screen, pygame.mouse.get_pos())
 
         # Pixelate for 8-bit feel (subtle)
         # (commented out for performance - uncomment for more retro look)
