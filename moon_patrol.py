@@ -7,12 +7,13 @@ import math
 import random
 import array
 import os
+from collections import deque
 
 pygame.init()
 pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
 
 # --- Constants ---
-SCREEN_W, SCREEN_H = 800, 600
+SCREEN_W, SCREEN_H = 1040, 780
 FPS = 60
 TILE = 8  # 8-bit pixel size
 
@@ -34,19 +35,19 @@ MAGENTA = (220, 40, 180)
 BROWN   = (140, 80, 40)
 TAN     = (180, 140, 80)
 LASER_BLUE   = (55, 150, 210)
-MOON_SURFACE = (180, 170, 140)
-MOON_DARK    = (120, 110, 90)
-MOON_SHADOW  = (80, 75, 60)
+MOON_SURFACE = (108, 100, 80)
+MOON_DARK    = (68, 62, 50)
+MOON_SHADOW  = (44, 40, 32)
 SKY_TOP      = (5, 5, 20)
-SKY_BOT      = (20, 10, 50)
+SKY_BOT      = (5, 5, 5)
 
 # Game settings
 GRAVITY       = 0.4
-SCROLL_SPEED  = 3.0
+SCROLL_SPEED  = 2.4
 PLAYER_SPEED  = 2.5
 JUMP_VEL      = -10
 BULLET_SPEED  = 8
-LASER_SPEED   = BULLET_SPEED * 1.3 * 1.3
+LASER_SPEED   = BULLET_SPEED * 1.7
 ALIEN_BULLET_SPEED = 4
 LEVEL_LENGTH  = 12000   # pixels of terrain to generate
 
@@ -196,6 +197,19 @@ def gen_win_sound():
         samples.append(s * env * 0.8)
     return make_sound(samples)
 
+def gen_wave_sound():
+    """Low swooping pulse for wave fire."""
+    dur = 0.5
+    n = int(SAMPLE_RATE * dur)
+    samples = []
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        freq = 180 + 320 * (t / dur)          # sweep 180→500 Hz
+        env = adsr(t, dur, 0.01, 0.1, 0.5, 0.3)
+        s = sine(t, freq) * 0.6 + sine(t, freq * 1.5) * 0.25
+        samples.append(s * env * 0.7)
+    return make_sound(samples)
+
 # Pre-generate sounds
 SND_SHOOT    = pygame.mixer.Sound('/Users/nickhobson/Claude/gridrunner/data/spo.wav')
 SND_EXPLODE  = gen_explosion_sound()
@@ -203,19 +217,18 @@ SND_ALIEN_SHOOT = gen_alien_shoot_sound()
 SND_JUMP     = gen_jump_sound()
 SND_HIT      = gen_hit_sound()
 SND_WIN      = gen_win_sound()
+SND_WAVE     = gen_wave_sound()
 
 # ─────────────────────────────────────────────
 # TERRAIN GENERATION
 # ─────────────────────────────────────────────
-TERRAIN_GROUND_Y = 492  # baseline y on screen
+TERRAIN_GROUND_Y = 640  # baseline y on screen
 TERRAIN_RESOLUTION = 4  # pixels per terrain sample
 
 def generate_terrain(length):
     """Generate undulating moon surface heights (y positions, screen coords)."""
     points = length // TERRAIN_RESOLUTION + 10
     heights = []
-    # Use multiple sine waves + random craters
-    h = TERRAIN_GROUND_Y
     for i in range(points):
         x = i * TERRAIN_RESOLUTION
         y = (TERRAIN_GROUND_Y
@@ -245,44 +258,34 @@ def generate_terrain(length):
     return heights
 
 # ─────────────────────────────────────────────
-# PIXEL ART DRAWING HELPERS
+# TANK SPRITE (8-bit pixel art)
 # ─────────────────────────────────────────────
-def draw_pixel_rect(surf, color, x, y, w, h):
-    pygame.draw.rect(surf, color, (x, y, w, h))
+TANK_HULL   = (48, 105, 36)
+TANK_DARK   = (24,  56, 18)
+TURRET_COL  = (60, 128, 45)
+GUN_COL     = (28,  62, 20)
+TURRET_RADIUS = 9
+GUN_LENGTH    = 32
+GUN_WIDTH     = 5
 
-def draw_8bit_text(surf, text, x, y, color=WHITE, scale=2):
-    font = pygame.font.SysFont("monospace", 14 * scale // 2, bold=True)
-    img = font.render(text, False, color)
-    img = pygame.transform.scale(img, (img.get_width() * scale // 2, img.get_height() * scale // 2))
-    surf.blit(img, (x, y))
-
-def pixelate(surf, factor=2):
-    small = pygame.transform.scale(surf, (surf.get_width()//factor, surf.get_height()//factor))
-    return pygame.transform.scale(small, (surf.get_width(), surf.get_height()))
-
-# ─────────────────────────────────────────────
-# VEHICLE SPRITE (8-bit pixel art)
-# ─────────────────────────────────────────────
-# 16x10 pixel art, each char = 1 pixel
 VEHICLE_PIXELS = [
     "................",
-    "....BBBBBBBB....",
-    "...BBBBBBBBBB...",
-    "..BBBWWBBBWWBB..",
-    "..BBBBBBBBBBBB..",
-    ".GGGGGGGGGGGGGG.",
-    ".GGGYYYYYYYYGGG.",
     "................",
-    "..OOO......OOO..",
-    "..OOO......OOO..",
+    "..HHHHHHHHHHHH..",
+    "HHHHHHHHHHHHHHHH",
+    "HHHHHHHHHHHHHHHH",
+    "HHHHHHHHHHHHHHHH",
+    "DHDHDHDHDHDHDHDH",
+    "DHDHDHDHDHDHDHDH",
+    "................",
+    "................",
 ]
 VEHICLE_COLOR_MAP = {
-    'B': LTBLUE, 'W': WHITE, 'G': DKGRAY, 'Y': YELLOW, 'O': GRAY,
-    '.': None,
+    'H': TANK_HULL, 'D': TANK_DARK, '.': None,
 }
 
 def build_vehicle_surf():
-    pw = 3  # pixel width
+    pw = 3
     surf = pygame.Surface((16*pw, 10*pw), pygame.SRCALPHA)
     for row, line in enumerate(VEHICLE_PIXELS):
         for col, ch in enumerate(line):
@@ -294,29 +297,6 @@ def build_vehicle_surf():
 VEHICLE_SURF = build_vehicle_surf()
 VEHICLE_W = VEHICLE_SURF.get_width()
 VEHICLE_H = VEHICLE_SURF.get_height()
-
-# Wheel pixel art
-WHEEL_PIXELS = [
-    ".OOO.",
-    "OOOOO",
-    "OWOOO",
-    "OOOOO",
-    ".OOO.",
-]
-def build_wheel_surf():
-    pw = 3
-    surf = pygame.Surface((5*pw, 5*pw), pygame.SRCALPHA)
-    cmap = {'O': GRAY, 'W': WHITE, '.': None}
-    for row, line in enumerate(WHEEL_PIXELS):
-        for col, ch in enumerate(line):
-            c = cmap.get(ch)
-            if c:
-                pygame.draw.rect(surf, c, (col*pw, row*pw, pw, pw))
-    return surf
-
-WHEEL_SURF = build_wheel_surf()
-WHEEL_W = WHEEL_SURF.get_width()
-WHEEL_H = WHEEL_SURF.get_height()
 
 # ─────────────────────────────────────────────
 # ALIEN SPRITE (8-bit pixel art)
@@ -371,11 +351,9 @@ class Particle:
 
     def draw(self, surf):
         if self.life > 0:
-            alpha = int(255 * self.life / self.max_life)
-            s = pygame.Surface((self.size, self.size))
-            s.fill(self.color)
-            s.set_alpha(alpha)
-            surf.blit(s, (int(self.x), int(self.y)))
+            t = self.life / self.max_life
+            c = (int(self.color[0] * t), int(self.color[1] * t), int(self.color[2] * t))
+            pygame.draw.rect(surf, c, (int(self.x), int(self.y), self.size, self.size))
 
 # ─────────────────────────────────────────────
 # STAR FIELD
@@ -383,6 +361,15 @@ class Particle:
 STARS = [(random.randint(0, SCREEN_W), random.randint(0, TERRAIN_GROUND_Y - 50),
           random.choice([1, 1, 1, 2]), random.uniform(0.2, 1.0))
          for _ in range(150)]
+
+# Pre-built sky gradient surface (replaces 640 draw.line calls per frame)
+_SKY_SURF = pygame.Surface((SCREEN_W, TERRAIN_GROUND_Y))
+for _y in range(TERRAIN_GROUND_Y):
+    _t = _y / TERRAIN_GROUND_Y
+    _r = int(SKY_TOP[0] + (SKY_BOT[0] - SKY_TOP[0]) * _t)
+    _g = int(SKY_TOP[1] + (SKY_BOT[1] - SKY_TOP[1]) * _t)
+    _b = int(SKY_TOP[2] + (SKY_BOT[2] - SKY_TOP[2]) * _t)
+    pygame.draw.line(_SKY_SURF, (_r, _g, _b), (0, _y), (SCREEN_W, _y))
 
 # ─────────────────────────────────────────────
 # GAME ENTITIES
@@ -397,14 +384,12 @@ class Bullet:
         self.owner = owner
         self.alive = True
         self.w, self.h = 6, 3
-        self.trail = []
         self.max_trail = 6 if owner == 'player' else 0
+        self.trail = deque(maxlen=self.max_trail) if self.max_trail else []
 
     def update(self):
         if self.max_trail:
             self.trail.append((self.x, self.y))
-            if len(self.trail) > self.max_trail:
-                self.trail.pop(0)
         self.x += self.vx
         self.y += self.vy
         if self.x > SCREEN_W + 50 or self.x < -50 or self.y < -50 or self.y > SCREEN_H + 50:
@@ -418,7 +403,7 @@ class Bullet:
             pygame.draw.rect(surf, WHITE, (int(self.x)+1, int(self.y)+1, self.w-2, 1))
 
     def _draw_laser(self, surf):
-        all_pts = self.trail + [(self.x, self.y)]
+        all_pts = list(self.trail) + [(self.x, self.y)]
         n = len(all_pts)
         if n >= 2:
             for i in range(n - 1):
@@ -502,6 +487,75 @@ class Coin:
             shine = tuple(min(255, c + 90) for c in self.color)
             pygame.draw.circle(surf, shine, (sx - 2, sy - 2), 2)
             pygame.draw.circle(surf, WHITE, (sx, sy), self.r, 1)
+
+WAVE_COLOR      = (180, 60, 220)   # purple
+WAVE_SPEED      = 6                # px per frame expansion (×1.2 from original 5)
+WAVE_WIDTH      = 5                # arc stroke width (px)
+WAVE_ARC_MAX    = math.radians(7.5)  # half-angle → full arc = 15°
+WAVE_ARC_GROW   = math.radians(0.35) # half-angle added per frame
+WAVE_KILL_R     = SCREEN_W + SCREEN_H + 300  # die once unreachable
+WAVE_TRAIL_LEN  = 14               # ghost snapshots kept for trail
+
+class Wave:
+    """Expanding arc fired along the gun's aim direction (max 15° wide)."""
+    def __init__(self, x, y, angle):
+        self.x = x
+        self.y = y
+        self.angle = angle
+        self.r = float(GUN_LENGTH)
+        self.half_arc = math.radians(1.5)
+        self.alive = True
+        self.trail = deque()   # each entry: (r, half_arc)
+
+    def update(self):
+        # snapshot before moving — builds the trail behind the head
+        self.trail.append((self.r, self.half_arc))
+        if len(self.trail) > WAVE_TRAIL_LEN:
+            self.trail.popleft()
+        self.r += WAVE_SPEED
+        self.half_arc = min(WAVE_ARC_MAX, self.half_arc + WAVE_ARC_GROW)
+        if self.r > WAVE_KILL_R:
+            self.alive = False
+
+    def _draw_arc(self, surf, cx, cy, r, half_arc, color, width):
+        r = int(r)
+        if r < width:
+            return
+        rect = pygame.Rect(cx - r, cy - r, r * 2, r * 2)
+        pa = -self.angle
+        pygame.draw.arc(surf, color, rect, pa - half_arc, pa + half_arc, min(r, width))
+
+    def draw(self, surf):
+        if not self.alive:
+            return
+        cx, cy = int(self.x), int(self.y)
+
+        # Trail — ghost arcs fading from dim to bright toward the head
+        n = len(self.trail)
+        for i, (tr, tha) in enumerate(self.trail):
+            fade = (i + 1) / (n + 1)   # 0=oldest, approaches 1 near head
+            tc = (int(WAVE_COLOR[0] * fade * 0.55),
+                  int(WAVE_COLOR[1] * fade * 0.55),
+                  int(WAVE_COLOR[2] * fade * 0.55))
+            self._draw_arc(surf, cx, cy, tr, tha, tc, max(1, WAVE_WIDTH - 2))
+
+        # Head — glow then bright core
+        self._draw_arc(surf, cx, cy, self.r, self.half_arc, (100, 0, 160), WAVE_WIDTH + 6)
+        self._draw_arc(surf, cx, cy, self.r, self.half_arc, WAVE_COLOR,    WAVE_WIDTH)
+        self._draw_arc(surf, cx, cy, self.r, self.half_arc, (230, 160, 255), max(1, WAVE_WIDTH - 2))
+
+    def hits_alien(self, alien):
+        """True if the arc ring band currently sweeps over the alien."""
+        ax = alien.screen_x + alien.w // 2
+        ay = alien.y + alien.h // 2
+        dist = math.hypot(ax - self.x, ay - self.y)
+        if abs(dist - self.r) > alien.w // 2 + WAVE_WIDTH + 2:
+            return False
+        # Angle check — is alien within the arc sweep?
+        alien_angle = math.atan2(ay - self.y, ax - self.x)
+        diff = (alien_angle - self.angle + math.pi) % (2 * math.pi) - math.pi
+        return abs(diff) <= self.half_arc
+
 
 class Alien:
     TYPES = ['swooper', 'hoverer', 'diver']
@@ -589,13 +643,14 @@ class Player:
         self.lives = 3
         self.score = 0
         self.invincible = 0
-        self.wheel_rot = [0.0, 0.0]  # front and rear wheel rotation
-        # Wheel offsets from vehicle bottom-left
+        # Track contact offsets (front and rear)
         self.wheel_offsets = [(6, VEHICLE_H - 4), (VEHICLE_W - 11, VEHICLE_H - 4)]
         self.tilt = 0.0  # body tilt angle
         self.fire_rate_boost = 0  # frames remaining for rapid-fire
         self.spread_shot = 0     # frames remaining for spread shot
         self.cyan_coins = 0      # cyan coins collected toward next spread activation
+        self.purple_coins = 0   # purple coins collected toward wave fire
+        self.wave_fire = 0      # frames remaining for wave fire powerup
         self.dead = False
         self.dead_timer = 0
 
@@ -613,7 +668,7 @@ class Player:
         idx = max(0, min(idx, len(terrain_heights)-1))
         return terrain_heights[idx]
 
-    def update(self, keys, terrain_heights, camera_x, bullets):
+    def update(self, keys, terrain_heights, camera_x, bullets, waves):
         if self.dead:
             self.dead_timer -= 1
             return
@@ -658,11 +713,6 @@ class Player:
         dx = self.wheel_offsets[1][0] - self.wheel_offsets[0][0]
         self.tilt = math.atan2(dy, dx)
 
-        # Wheel rotation (proportional to horizontal speed)
-        speed_factor = abs(self.vx) + SCROLL_SPEED
-        self.wheel_rot[0] = (self.wheel_rot[0] + speed_factor * 0.15) % (2*math.pi)
-        self.wheel_rot[1] = (self.wheel_rot[1] + speed_factor * 0.15) % (2*math.pi)
-
         # Jump
         if (keys[pygame.K_SPACE] or keys[pygame.K_UP] or keys[pygame.K_w]) and self.on_ground:
             self.vy = JUMP_VEL
@@ -675,19 +725,31 @@ class Player:
             self.fire_rate_boost -= 1
         if self.spread_shot > 0:
             self.spread_shot -= 1
+        if self.wave_fire > 0:
+            self.wave_fire -= 1
         shoot_cd = 13 if self.fire_rate_boost > 0 else 18
         if (keys[pygame.K_LCTRL] or keys[pygame.K_z] or keys[pygame.K_x]) and self.shoot_cooldown <= 0:
             self.shoot_cooldown = shoot_cd
-            bx = self.x + VEHICLE_W
-            by = self.y + VEHICLE_H // 3
-            bullets.append(Bullet(bx, by, LASER_SPEED, -LASER_SPEED * 0.5, LASER_BLUE, 'player'))
-            bullets.append(Bullet(bx, by + 6, LASER_SPEED, 0, LASER_BLUE, 'player'))
+            tx = self.x + VEHICLE_W // 2
+            ty = self.y + VEHICLE_H // 3
+            mx, my = pygame.mouse.get_pos()
+            dx = mx - tx
+            dy = my - ty
+            dist = max(1, math.sqrt(dx*dx + dy*dy))
+            ndx, ndy = dx / dist, dy / dist
+            bx = tx + ndx * GUN_LENGTH
+            by = ty + ndy * GUN_LENGTH
+            bullets.append(Bullet(bx, by, ndx * LASER_SPEED, ndy * LASER_SPEED, LASER_BLUE, 'player'))
             if self.spread_shot > 0:
-                # Extra bullet 5° below straight right
                 a = math.radians(5)
-                bullets.append(Bullet(bx, by + 6,
-                                      LASER_SPEED * math.cos(a), LASER_SPEED * math.sin(a),
+                ca, sa = math.cos(a), math.sin(a)
+                bullets.append(Bullet(bx, by,
+                                      (ndx * ca - ndy * sa) * LASER_SPEED,
+                                      (ndx * sa + ndy * ca) * LASER_SPEED,
                                       CYAN, 'player'))
+            if self.wave_fire > 0 and len(waves) < 2:
+                waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
+                SND_WAVE.play()
             SND_SHOOT.play()
 
     def hit(self):
@@ -698,7 +760,7 @@ class Player:
         SND_HIT.play()
         return True
 
-    def draw(self, surf, terrain_heights, camera_x):
+    def draw(self, surf):
         if self.dead:
             return
 
@@ -706,29 +768,27 @@ class Player:
         if self.invincible > 0 and (self.invincible // 6) % 2 == 0:
             return
 
-        # Draw wheels (behind vehicle body)
-        for i, (ox, oy) in enumerate(self.wheel_offsets):
-            wx = int(self.x + ox - WHEEL_W//2)
-            wy_terrain = self.get_wheel_ground_y(terrain_heights, camera_x, ox)
-            wy = int(wy_terrain - WHEEL_H + 2)
-
-            # Rotate wheel
-            rot_surf = pygame.transform.rotate(WHEEL_SURF, -math.degrees(self.wheel_rot[i]))
-            rw, rh = rot_surf.get_size()
-            surf.blit(rot_surf, (wx - rw//2 + WHEEL_W//2, wy - rh//2 + WHEEL_H//2))
-
-        # Draw vehicle body (tilted)
+        # Draw tank hull (tilted to terrain)
         rotated = pygame.transform.rotate(VEHICLE_SURF, -math.degrees(self.tilt))
-        rw, rh = rotated.get_size()
-        body_y = self.y
-        surf.blit(rotated, (int(self.x) - (rw - VEHICLE_W)//2, int(body_y)))
+        rw, _ = rotated.get_size()
+        surf.blit(rotated, (int(self.x) - (rw - VEHICLE_W)//2, int(self.y)))
 
-        # Exhaust flame
-        if random.random() < 0.5:
-            fx = int(self.x) + 2
-            fy = int(self.y) + VEHICLE_H - 4
-            pygame.draw.ellipse(surf, ORANGE, (fx, fy, 6, 4))
-            pygame.draw.ellipse(surf, YELLOW, (fx+1, fy+1, 4, 2))
+        # Turret centre
+        tx = int(self.x + VEHICLE_W // 2)
+        ty = int(self.y + VEHICLE_H // 3)
+
+        # Gun barrel pointing at crosshair
+        mx, my = pygame.mouse.get_pos()
+        angle = math.atan2(my - ty, mx - tx)
+        gx = tx + int(math.cos(angle) * GUN_LENGTH)
+        gy = ty + int(math.sin(angle) * GUN_LENGTH)
+        pygame.draw.line(surf, (14, 34, 10), (tx, ty), (gx, gy), GUN_WIDTH + 2)  # dark outline
+        pygame.draw.line(surf, GUN_COL,      (tx, ty), (gx, gy), GUN_WIDTH)
+
+        # Turret dome
+        pygame.draw.circle(surf, (20, 48, 14), (tx, ty), TURRET_RADIUS + 1)  # shadow ring
+        pygame.draw.circle(surf, TURRET_COL,   (tx, ty), TURRET_RADIUS)
+        pygame.draw.circle(surf, (90, 170, 65), (tx - 2, ty - 2), 3)          # highlight
 
 # ─────────────────────────────────────────────
 # TERRAIN RENDERING
@@ -756,7 +816,7 @@ def draw_terrain(surf, terrain_heights, camera_x):
             if i % 3 == 0:
                 pygame.draw.line(surf, MOON_DARK, (x, y), (x+2, y+4), 1)
         # Surface top line
-        top_pts = [p for p in poly[1:-1]]
+        top_pts = poly[1:-1]
         if len(top_pts) > 1:
             pygame.draw.lines(surf, MOON_DARK, False, top_pts, 2)
         # Shadow rim
@@ -795,13 +855,8 @@ def draw_rocks(surf, camera_x, terrain_heights):
 # SKY / BACKGROUND
 # ─────────────────────────────────────────────
 def draw_sky(surf, camera_x):
-    # Gradient sky
-    for y in range(TERRAIN_GROUND_Y):
-        t = y / TERRAIN_GROUND_Y
-        r = int(SKY_TOP[0] + (SKY_BOT[0]-SKY_TOP[0]) * t)
-        g = int(SKY_TOP[1] + (SKY_BOT[1]-SKY_TOP[1]) * t)
-        b = int(SKY_TOP[2] + (SKY_BOT[2]-SKY_TOP[2]) * t)
-        pygame.draw.line(surf, (r, g, b), (0, y), (SCREEN_W, y))
+    # Gradient sky (single blit from pre-built surface)
+    surf.blit(_SKY_SURF, (0, 0))
 
     # Stars (parallax)
     for (sx, sy, size, brightness) in STARS:
@@ -860,6 +915,13 @@ def draw_hud(surf, player, camera_x, level_length):
         surf.blit(FONT_TINY.render(f"SPREAD  {secs}s", True, CYAN), (SCREEN_W - 160, 22))
     elif player.cyan_coins > 0:
         surf.blit(FONT_TINY.render(f"SPREAD  {'o' * player.cyan_coins}{'.' * (3 - player.cyan_coins)}", True, CYAN), (SCREEN_W - 160, 22))
+
+    # Wave fire indicator
+    if player.wave_fire > 0:
+        secs = math.ceil(player.wave_fire / 60)
+        surf.blit(FONT_TINY.render(f"WAVE FIRE  {secs}s", True, PURPLE), (SCREEN_W - 160, 36))
+    elif player.purple_coins > 0:
+        surf.blit(FONT_TINY.render(f"WAVE  {'o' * player.purple_coins}{'.' * (3 - player.purple_coins)}", True, PURPLE), (SCREEN_W - 160, 36))
 
     # Controls reminder
     surf.blit(FONT_TINY.render("ARROWS/WASD:MOVE  SPACE:JUMP  LMB:FIRE", True, GRAY), (10, SCREEN_H - 18))
@@ -936,6 +998,7 @@ def game_loop():
     aliens = []
     coins = []
     particles = []
+    waves = []
     spawner = AlienSpawner()
 
     FINISH_WORLD_X = LEVEL_LENGTH - 200
@@ -1016,19 +1079,21 @@ def game_loop():
         player.score = int(camera_x * 2)
 
         # Update player
-        player.update(keys, terrain_heights, camera_x, bullets)
+        player.update(keys, terrain_heights, camera_x, bullets, waves)
 
         # Mouse firing toward crosshair
         mouse_pos = pygame.mouse.get_pos()
         mouse_buttons = pygame.mouse.get_pressed()
         if mouse_buttons[0] and player.shoot_cooldown <= 0 and not player.dead:
             player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
-            bx = player.x + VEHICLE_W
-            by = player.y + VEHICLE_H // 3
-            dx = mouse_pos[0] - bx
-            dy = mouse_pos[1] - by
+            tx = player.x + VEHICLE_W // 2
+            ty = player.y + VEHICLE_H // 3
+            dx = mouse_pos[0] - tx
+            dy = mouse_pos[1] - ty
             dist = max(1, math.sqrt(dx * dx + dy * dy))
             ndx, ndy = dx / dist, dy / dist
+            bx = tx + ndx * GUN_LENGTH
+            by = ty + ndy * GUN_LENGTH
             bullets.append(Bullet(bx, by, ndx * LASER_SPEED, ndy * LASER_SPEED, LASER_BLUE, 'player'))
             if player.spread_shot > 0:
                 # Rotate aim direction by 5° for extra bullet
@@ -1038,6 +1103,9 @@ def game_loop():
                                       (ndx * ca - ndy * sa) * LASER_SPEED,
                                       (ndx * sa + ndy * ca) * LASER_SPEED,
                                       CYAN, 'player'))
+            if player.wave_fire > 0 and len(waves) == 0:
+                waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
+                SND_WAVE.play()
             SND_SHOOT.play()
 
         # Check win
@@ -1123,8 +1191,34 @@ def game_loop():
                     if player.cyan_coins >= 3:
                         player.cyan_coins = 0
                         player.spread_shot = max(player.spread_shot, 600)
+                elif c.color == PURPLE:
+                    player.purple_coins += 1
+                    if player.purple_coins >= 3:
+                        player.purple_coins = 0
+                        player.wave_fire = max(player.wave_fire, 600)
                 player.score += 100
         coins[:] = [c for c in coins if c.alive]
+
+        # Waves
+        for w in waves:
+            w.update()
+        for w in waves:
+            for alien in aliens:
+                if alien.alive and w.hits_alien(alien):
+                    alien.hp -= 1
+                    if alien.hp <= 0:
+                        alien.alive = False
+                        player.score += 500
+                        SND_EXPLODE.play()
+                        for _ in range(20):
+                            particles.append(Particle(alien.screen_x + alien.w//2,
+                                                      alien.y + alien.h//2))
+                        for _ in range(random.randint(2, 4)):
+                            coins.append(Coin(
+                                alien.screen_x + camera_x + alien.w//2 + random.uniform(-12, 12),
+                                alien.y + alien.h//2,
+                                alien.coin_color))
+        waves[:] = [w for w in waves if w.alive]
 
         # Particles
         for p in particles:
@@ -1157,8 +1251,12 @@ def game_loop():
         for b in bullets:
             b.draw(screen)
 
+        # Draw waves
+        for w in waves:
+            w.draw(screen)
+
         # Draw player
-        player.draw(screen, terrain_heights, camera_x)
+        player.draw(screen)
 
         # Particles
         for p in particles:
