@@ -585,7 +585,7 @@ class Submunition:
 
 
 class StarburstShot:
-    TRAVEL = 200.0
+    TRAVEL = 350.0
     SPD    = 5.0
 
     def __init__(self, x, y, ndx, ndy):
@@ -910,7 +910,8 @@ class Player:
         if self.starburst > 0:
             self.starburst -= 1
         shoot_cd = 13 if self.fire_rate_boost > 0 else 18
-        if (keys[pygame.K_LCTRL] or keys[pygame.K_z] or keys[pygame.K_x]) and self.shoot_cooldown <= 0:
+        if (keys[pygame.K_LCTRL] or keys[pygame.K_z] or keys[pygame.K_x]
+                or pygame.mouse.get_pressed()[0]) and self.shoot_cooldown <= 0:
             self.shoot_cooldown = shoot_cd
             tx = self.x + VEHICLE_W // 2
             ty = self.y + VEHICLE_H // 3
@@ -937,7 +938,7 @@ class Player:
         if self.wave_fire > 0 and len(waves) < 2:
             waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
             SND_WAVE.play()
-        if self.starburst > 0:
+        if self.starburst > 0 and random.random() < 0.15:
             starbursts.append(StarburstShot(bx, by, ndx, ndy))
         SND_SHOOT.play()
 
@@ -1352,29 +1353,19 @@ def game_loop():
     _vplay(VOX_TITLE)
 
     pygame.mouse.set_visible(False)
-    mouse_held = False       # LMB currently held
-    fire_requested = False   # set on MOUSEBUTTONDOWN, consumed by fire block
-
     running = True
     while running:
         dt = clock.tick(FPS)
         keys = pygame.key.get_pressed()
-        fire_requested = False   # reset each frame before processing events
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                mouse_held = True
-                fire_requested = True    # latch click even if released same frame
                 if show_title:           # LMB also starts the game
                     show_title = False
                     SND_ROBOT_START.play()
                     _vplay(VOX_READY)
-            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                mouse_held = False
-            if event.type == pygame.MOUSEMOTION and event.buttons[0]:
-                mouse_held = True        # catch held-drag that missed BUTTONDOWN
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return False
@@ -1437,18 +1428,6 @@ def game_loop():
             SND_ROBOT_GAMEOVER.play()
             _vplay(VOX_GAMEOVER)
 
-        # Mouse firing toward crosshair (click or hold)
-        if (fire_requested or mouse_held or pygame.mouse.get_pressed()[0]) and player.lives > 0 and player.shoot_cooldown <= 0:
-            player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
-            _mx, _my = pygame.mouse.get_pos()
-            _tx = player.x + VEHICLE_W // 2
-            _ty = player.y + VEHICLE_H // 3
-            _dx = _mx - _tx;  _dy = _my - _ty
-            _dist = max(1, math.sqrt(_dx * _dx + _dy * _dy))
-            _ndx, _ndy = _dx / _dist, _dy / _dist
-            _bx = _tx + _ndx * GUN_LENGTH
-            _by = _ty + _ndy * GUN_LENGTH
-            player._fire_shot(_ndx, _ndy, _bx, _by, bullets, waves, starbursts)
 
         # Check win
         finish_screen_x = FINISH_WORLD_X - camera_x
