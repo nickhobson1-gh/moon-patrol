@@ -440,7 +440,7 @@ STARS = [(random.randint(0, SCREEN_W), random.randint(0, TERRAIN_GROUND_Y - 50),
           random.choice([1, 1, 1, 2]), random.uniform(0.2, 1.0))
          for _ in range(150)]
 
-# Pre-built sky gradient surface (replaces 640 draw.line calls per frame)
+# Pre-built sky gradient surface
 _SKY_SURF = pygame.Surface((SCREEN_W, TERRAIN_GROUND_Y))
 for _y in range(TERRAIN_GROUND_Y):
     _t = _y / TERRAIN_GROUND_Y
@@ -448,6 +448,19 @@ for _y in range(TERRAIN_GROUND_Y):
     _g = int(SKY_TOP[1] + (SKY_BOT[1] - SKY_TOP[1]) * _t)
     _b = int(SKY_TOP[2] + (SKY_BOT[2] - SKY_TOP[2]) * _t)
     pygame.draw.line(_SKY_SURF, (_r, _g, _b), (0, _y), (SCREEN_W, _y))
+
+# Background image — scaled to screen height, tiled horizontally, scrolls at 20% parallax
+_BG_IMG_PATH = os.path.join(os.path.dirname(__file__), 'moon_background.png')
+try:
+    _bg_raw = pygame.image.load(_BG_IMG_PATH).convert()
+    _bg_raw.set_colorkey((0, 0, 0))
+    _bg_aspect = _bg_raw.get_width() / _bg_raw.get_height()
+    _BG_TILE_W = max(SCREEN_W, int(TERRAIN_GROUND_Y * _bg_aspect))
+    _BG_SURF = pygame.transform.smoothscale(_bg_raw, (_BG_TILE_W, TERRAIN_GROUND_Y))
+    _BG_SURF.set_colorkey((0, 0, 0))
+except Exception:
+    _BG_SURF = None
+    _BG_TILE_W = SCREEN_W
 
 # ─────────────────────────────────────────────
 # GAME ENTITIES
@@ -983,8 +996,16 @@ def draw_rocks(surf, camera_x, terrain_heights):
 # SKY / BACKGROUND
 # ─────────────────────────────────────────────
 def draw_sky(surf, camera_x):
-    # Gradient sky (single blit from pre-built surface)
+    # 1. Gradient sky behind everything
     surf.blit(_SKY_SURF, (0, 0))
+
+    # 2. Background image — scrolls at 20% of terrain, tiles horizontally
+    if _BG_SURF is not None:
+        offset = int(camera_x * 0.20) % _BG_TILE_W
+        x = -offset
+        while x < SCREEN_W:
+            surf.blit(_BG_SURF, (x, 200))
+            x += _BG_TILE_W
 
     # Stars (parallax)
     for (sx, sy, size, brightness) in STARS:
@@ -1006,15 +1027,6 @@ def draw_sky(surf, camera_x):
         pygame.draw.circle(surf, (210, 210, 180), (cx, cy), cr)
         pygame.draw.circle(surf, (190, 190, 160), (cx, cy), cr, 1)
 
-    # Distant mountains (parallax layer 2) — local RNG so global state is unaffected
-    _mrng = random.Random(42)
-    for i in range(12):
-        mx = int((i * 200 - camera_x * 0.15) % (SCREEN_W + 200)) - 50
-        mh = _mrng.randint(40, 100)
-        mw = _mrng.randint(60, 120)
-        pts = [(mx, TERRAIN_GROUND_Y), (mx+mw//2, TERRAIN_GROUND_Y-mh), (mx+mw, TERRAIN_GROUND_Y)]
-        pygame.draw.polygon(surf, (35, 32, 50), pts)
-        pygame.draw.lines(surf, (50, 45, 70), False, pts[:-1], 1)
 
 # ─────────────────────────────────────────────
 # POWERUP POPUP
@@ -1227,6 +1239,35 @@ def game_loop():
     pygame.mouse.set_visible(False)
     mouse_held = False   # tracks left-button held state via events
 
+    def _mouse_fire():
+        """Fire a bullet toward the current mouse position (if cooldown allows)."""
+        if player.dead or show_title or game_over or won:
+            return
+        if player.shoot_cooldown > 0:
+            return
+        player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
+        mx, my = pygame.mouse.get_pos()
+        tx = player.x + VEHICLE_W // 2
+        ty = player.y + VEHICLE_H // 3
+        dx = mx - tx;  dy = my - ty
+        dist = max(1, math.sqrt(dx * dx + dy * dy))
+        ndx, ndy = dx / dist, dy / dist
+        bx = tx + ndx * GUN_LENGTH
+        by = ty + ndy * GUN_LENGTH
+        spd = LASER_SPEED * 2 if player.bullet_speedup > 0 else LASER_SPEED
+        bullets.append(Bullet(bx, by, ndx * spd, ndy * spd, LASER_BLUE, 'player'))
+        if player.spread_shot > 0:
+            a = math.radians(5)
+            ca, sa = math.cos(a), math.sin(a)
+            bullets.append(Bullet(bx, by,
+                                  (ndx * ca - ndy * sa) * spd,
+                                  (ndx * sa + ndy * ca) * spd,
+                                  LASER_BLUE, 'player'))
+        if player.wave_fire > 0 and len(waves) == 0:
+            waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
+            SND_WAVE.play()
+        SND_SHOOT.play()
+
     running = True
     while running:
         dt = clock.tick(FPS)
@@ -1237,6 +1278,7 @@ def game_loop():
                 return False
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mouse_held = True
+                _mouse_fire()   # fire immediately on click event
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_held = False
             if event.type == pygame.KEYDOWN:
@@ -1301,33 +1343,9 @@ def game_loop():
             SND_ROBOT_GAMEOVER.play()
             _vplay(VOX_GAMEOVER)
 
-        # Mouse firing toward crosshair
-        mouse_pos = pygame.mouse.get_pos()
-        lmb = mouse_held or pygame.mouse.get_pressed()[0]
-        if lmb and player.shoot_cooldown <= 0 and not player.dead:
-            player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
-            tx = player.x + VEHICLE_W // 2
-            ty = player.y + VEHICLE_H // 3
-            dx = mouse_pos[0] - tx
-            dy = mouse_pos[1] - ty
-            dist = max(1, math.sqrt(dx * dx + dy * dy))
-            ndx, ndy = dx / dist, dy / dist
-            bx = tx + ndx * GUN_LENGTH
-            by = ty + ndy * GUN_LENGTH
-            spd = LASER_SPEED * 2 if player.bullet_speedup > 0 else LASER_SPEED
-            bullets.append(Bullet(bx, by, ndx * spd, ndy * spd, LASER_BLUE, 'player'))
-            if player.spread_shot > 0:
-                # Rotate aim direction by 5° for extra bullet
-                a = math.radians(5)
-                ca, sa = math.cos(a), math.sin(a)
-                bullets.append(Bullet(bx, by,
-                                      (ndx * ca - ndy * sa) * spd,
-                                      (ndx * sa + ndy * ca) * spd,
-                                      LASER_BLUE, 'player'))
-            if player.wave_fire > 0 and len(waves) == 0:
-                waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
-                SND_WAVE.play()
-            SND_SHOOT.play()
+        # Mouse firing toward crosshair (hold to auto-fire)
+        if mouse_held or pygame.mouse.get_pressed()[0]:
+            _mouse_fire()
 
         # Check win
         finish_screen_x = FINISH_WORLD_X - camera_x
