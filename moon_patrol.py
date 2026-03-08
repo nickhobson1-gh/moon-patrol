@@ -7,6 +7,8 @@ import math
 import random
 import array
 import os
+import subprocess
+import tempfile
 from collections import deque
 
 pygame.init()
@@ -34,10 +36,10 @@ PURPLE  = (160, 40, 220)
 MAGENTA = (220, 40, 180)
 BROWN   = (140, 80, 40)
 TAN     = (180, 140, 80)
-LASER_BLUE   = (55, 150, 210)
-MOON_SURFACE = (108, 100, 80)
-MOON_DARK    = (68, 62, 50)
-MOON_SHADOW  = (44, 40, 32)
+LASER_BLUE   = (20, 80, 180)
+MOON_SURFACE = (50, 50, 50)
+MOON_DARK    = (35, 35, 35)
+MOON_SHADOW  = (14, 14, 14)
 SKY_TOP      = (5, 10, 30)
 SKY_BOT      = (1, 5, 5)
 
@@ -64,11 +66,14 @@ try:
     FONT_MD   = pygame.font.Font(_FONT_PATH, 13)
     FONT_SM   = pygame.font.Font(_FONT_PATH, 10)
     FONT_TINY = pygame.font.Font(_FONT_PATH, 7)
+    FONT_POPUP = pygame.font.Font(_FONT_PATH, 22)
+    FONT_POPUP.set_italic(True)
 except Exception:
     FONT_LG   = pygame.font.SysFont("monospace", 48, bold=True)
     FONT_MD   = pygame.font.SysFont("monospace", 24, bold=True)
     FONT_SM   = pygame.font.SysFont("monospace", 16, bold=True)
     FONT_TINY = pygame.font.SysFont("monospace", 11, bold=True)
+    FONT_POPUP = pygame.font.SysFont("monospace", 36, bold=True, italic=True)
 
 # ─────────────────────────────────────────────
 # SOUND SYNTHESIS (modern sounds, programmatic)
@@ -197,6 +202,60 @@ def gen_win_sound():
         samples.append(s * env * 0.8)
     return make_sound(samples)
 
+def gen_robot_powerup_sound():
+    """R2D2-style ascending triple chirp with ring modulation."""
+    dur = 0.48
+    n = int(SAMPLE_RATE * dur)
+    samples = [0.0] * n
+    chirps = [(0.00, 0.14, 380,  900),
+              (0.16, 0.30, 620, 1300),
+              (0.32, 0.48, 950, 2000)]
+    carrier_freq = 75
+    for t0, t1, f0, f1 in chirps:
+        for i in range(int(t0 * SAMPLE_RATE), min(n, int(t1 * SAMPLE_RATE))):
+            t  = i / SAMPLE_RATE
+            lt = (t - t0) / (t1 - t0)
+            freq = f0 + (f1 - f0) * lt
+            env  = adsr(t - t0, t1 - t0, 0.005, 0.02, 0.75, 0.04)
+            buzz = square(t, freq, 0.3) * 0.5 + sine(t, freq) * 0.5
+            samples[i] = buzz * sine(t, carrier_freq) * env * 0.75
+    return make_sound(samples)
+
+def gen_robot_start_sound():
+    """Robotic rising sweep + harmonic sting for level start."""
+    dur = 0.9
+    n = int(SAMPLE_RATE * dur)
+    samples = []
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        p   = t / dur
+        freq    = 130 + 720 * (p ** 0.6)      # sweep 130→850 Hz
+        carrier = 55 + 35 * p                  # carrier rises slightly
+        env     = adsr(t, dur, 0.01, 0.05, 0.65, 0.25)
+        buzz    = square(t, freq, 0.35) * 0.55 + sine(t, freq * 2) * 0.2
+        s = buzz * sine(t, carrier) * env
+        # Final chord sting in the last 25 %
+        if p > 0.75:
+            k = (p - 0.75) / 0.25
+            s += (sine(t, 880) + sine(t, 1108) + sine(t, 1320)) * k * 0.18
+        samples.append(s * 0.7)
+    return make_sound(samples)
+
+def gen_robot_gameover_sound():
+    """Robotic descending wail with wobbling carrier for game over."""
+    dur = 1.6
+    n = int(SAMPLE_RATE * dur)
+    samples = []
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        p    = t / dur
+        freq    = 580 * ((1 - p) ** 0.7) + 70  # sweep 650→70 Hz
+        carrier = 48 + 28 * math.sin(t * 9)    # slow wobble
+        env     = adsr(t, dur, 0.01, 0.12, 0.55, 0.45)
+        buzz    = square(t, freq, 0.5) * 0.5 + sine(t, freq * 0.5) * 0.3
+        samples.append(buzz * sine(t, carrier) * env * 0.8)
+    return make_sound(samples)
+
 def gen_wave_sound():
     """Low swooping pulse for wave fire."""
     dur = 0.5
@@ -215,9 +274,48 @@ SND_SHOOT    = pygame.mixer.Sound('/Users/nickhobson/Claude/gridrunner/data/spo.
 SND_EXPLODE  = gen_explosion_sound()
 SND_ALIEN_SHOOT = gen_alien_shoot_sound()
 SND_JUMP     = gen_jump_sound()
-SND_HIT      = gen_hit_sound()
-SND_WIN      = gen_win_sound()
-SND_WAVE     = gen_wave_sound()
+SND_HIT              = gen_hit_sound()
+SND_WIN              = gen_win_sound()
+SND_WAVE             = gen_wave_sound()
+SND_ROBOT_POWERUP    = gen_robot_powerup_sound()
+SND_ROBOT_START      = gen_robot_start_sound()
+SND_ROBOT_GAMEOVER   = gen_robot_gameover_sound()
+
+# ─────────────────────────────────────────────
+# VOICE SYNTHESISER  (macOS 'say' + Zarvox)
+# ─────────────────────────────────────────────
+def _voice(text, voice='Zarvox', rate=105):
+    """Generate a pygame Sound via macOS say/afconvert. Returns None on failure."""
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.aiff', delete=False) as f:
+            aiff = f.name
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+            wav = f.name
+        subprocess.run(
+            ['say', '-v', voice, '-r', str(rate), '-o', aiff, text],
+            check=True, capture_output=True)
+        subprocess.run(
+            ['afconvert', '-f', 'WAVE', '-d', 'LEI16@22050', aiff, wav],
+            check=True, capture_output=True)
+        snd = pygame.mixer.Sound(wav)
+        os.unlink(aiff)
+        os.unlink(wav)
+        return snd
+    except Exception:
+        return None
+
+VOX_TITLE      = _voice('Moon Patrol',  rate=90)
+VOX_READY      = _voice('Get ready',    rate=100)
+VOX_GAMEOVER   = _voice('Game over',    rate=85)
+VOX_RAPIDFIRE  = _voice('Rapid fire')
+VOX_SPREAD     = _voice('Spread shot')
+VOX_WAVE       = _voice('Wave fire')
+VOX_SPEED      = _voice('Speed boost')
+
+def _vplay(snd):
+    """Play a VOX sound if it was generated successfully."""
+    if snd:
+        snd.play()
 
 # ─────────────────────────────────────────────
 # TERRAIN GENERATION
@@ -364,7 +462,7 @@ class Bullet:
         self.owner = owner
         self.alive = True
         self.w, self.h = 6, 3
-        self.max_trail = 6 if owner == 'player' else 0
+        self.max_trail = 18 if owner == 'player' else 0
         self.trail = deque(maxlen=self.max_trail) if self.max_trail else []
 
     def update(self):
@@ -474,7 +572,7 @@ WAVE_WIDTH      = 5                # arc stroke width (px)
 WAVE_ARC_MAX    = math.radians(7.5)  # half-angle → full arc = 15°
 WAVE_ARC_GROW   = math.radians(0.35) # half-angle added per frame
 WAVE_KILL_R     = SCREEN_W + SCREEN_H + 300  # die once unreachable
-WAVE_TRAIL_LEN  = 14               # ghost snapshots kept for trail
+WAVE_TRAIL_LEN  = 50               # ghost snapshots kept for trail
 
 class Wave:
     """Expanding arc fired along the gun's aim direction (max 15° wide)."""
@@ -731,7 +829,7 @@ class Player:
                 bullets.append(Bullet(bx, by,
                                       (ndx * ca - ndy * sa) * spd,
                                       (ndx * sa + ndy * ca) * spd,
-                                      CYAN, 'player'))
+                                      LASER_BLUE, 'player'))
             if self.wave_fire > 0 and len(waves) < 2:
                 waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
                 SND_WAVE.play()
@@ -919,6 +1017,77 @@ def draw_sky(surf, camera_x):
         pygame.draw.lines(surf, (50, 45, 70), False, pts[:-1], 1)
 
 # ─────────────────────────────────────────────
+# POWERUP POPUP
+# ─────────────────────────────────────────────
+class PowerupPopup:
+    DURATION = 90  # 1.5 s at 60 fps
+
+    def __init__(self, text):
+        self.text   = text
+        self.timer  = self.DURATION
+
+    @property
+    def alive(self):
+        return self.timer > 0
+
+    def update(self):
+        self.timer -= 1
+
+def draw_popup(surf, popup):
+    if popup is None or not popup.alive:
+        return
+
+    frame    = PowerupPopup.DURATION - popup.timer   # 0 → DURATION
+    t_norm   = popup.timer / PowerupPopup.DURATION   # 1 → 0
+
+    # Fade in over first 15 %, hold, fade out over last 20 %
+    if t_norm > 0.85:
+        alpha = int(255 * (1.0 - t_norm) / 0.15)
+    elif t_norm < 0.20:
+        alpha = int(255 * t_norm / 0.20)
+    else:
+        alpha = 255
+
+    # Per-character shimmer: each letter has a phase offset → wave of colour
+    chars = list(popup.text)
+    char_surfs = []
+    for i, ch in enumerate(chars):
+        phase = frame * 0.30 + i * 0.55
+        r = 255
+        g = int(160 + 95 * abs(math.sin(phase)))
+        b = int(30  + 120 * abs(math.sin(phase + 1.4)))
+        s = FONT_POPUP.render(ch, True, (r, g, b))
+        char_surfs.append(s)
+
+    if not char_surfs:
+        return
+
+    total_w = sum(s.get_width() for s in char_surfs)
+    ch_h    = char_surfs[0].get_height()
+
+    # Subtle vertical float
+    float_y = int(6 * math.sin(frame * 0.12))
+
+    cx = SCREEN_W // 2 - total_w // 2
+    cy = SCREEN_H // 2 - ch_h // 2 + float_y
+
+    # Shadow pass (dark, offset)
+    sx = cx + 3
+    sy = cy + 3
+    for s in char_surfs:
+        shadow = FONT_POPUP.render(list(popup.text)[char_surfs.index(s)], True, (20, 10, 40))
+        shadow.set_alpha(alpha // 2)
+        surf.blit(shadow, (sx, sy))
+        sx += s.get_width()
+
+    # Main shimmer pass
+    x = cx
+    for s in char_surfs:
+        s.set_alpha(alpha)
+        surf.blit(s, (x, cy))
+        x += s.get_width()
+
+# ─────────────────────────────────────────────
 # HUD
 # ─────────────────────────────────────────────
 def draw_hud(surf, player, camera_x, level_length):
@@ -1036,6 +1205,7 @@ def game_loop():
     coins = []
     particles = []
     waves = []
+    active_popup = None
     spawner = AlienSpawner()
 
     FINISH_WORLD_X = LEVEL_LENGTH - 200
@@ -1052,8 +1222,10 @@ def game_loop():
 
     show_title = True
     title_timer = 0
+    _vplay(VOX_TITLE)
 
     pygame.mouse.set_visible(False)
+    mouse_held = False   # tracks left-button held state via events
 
     running = True
     while running:
@@ -1063,6 +1235,10 @@ def game_loop():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mouse_held = True
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                mouse_held = False
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return False
@@ -1070,6 +1246,8 @@ def game_loop():
                     return True  # restart
                 if event.key == pygame.K_RETURN and show_title:
                     show_title = False
+                    SND_ROBOT_START.play()
+                    _vplay(VOX_READY)
 
         if show_title:
             title_timer += 1
@@ -1118,10 +1296,15 @@ def game_loop():
         # Update player
         player.update(keys, terrain_heights, camera_x, bullets, waves)
 
+        if player.lives == 0 and not game_over:
+            game_over = True
+            SND_ROBOT_GAMEOVER.play()
+            _vplay(VOX_GAMEOVER)
+
         # Mouse firing toward crosshair
         mouse_pos = pygame.mouse.get_pos()
-        mouse_buttons = pygame.mouse.get_pressed()
-        if mouse_buttons[0] and player.shoot_cooldown <= 0 and not player.dead:
+        lmb = mouse_held or pygame.mouse.get_pressed()[0]
+        if lmb and player.shoot_cooldown <= 0 and not player.dead:
             player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
             tx = player.x + VEHICLE_W // 2
             ty = player.y + VEHICLE_H // 3
@@ -1140,7 +1323,7 @@ def game_loop():
                 bullets.append(Bullet(bx, by,
                                       (ndx * ca - ndy * sa) * spd,
                                       (ndx * sa + ndy * ca) * spd,
-                                      CYAN, 'player'))
+                                      LASER_BLUE, 'player'))
             if player.wave_fire > 0 and len(waves) == 0:
                 waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
                 SND_WAVE.play()
@@ -1224,21 +1407,33 @@ def game_loop():
                 c.alive = False
                 if c.color == RED:
                     player.fire_rate_boost = max(player.fire_rate_boost, 600)
+                    SND_ROBOT_POWERUP.play()
+                    _vplay(VOX_RAPIDFIRE)
+                    active_popup = PowerupPopup("RAPID FIRE")
                 elif c.color == CYAN:
                     player.cyan_coins += 1
                     if player.cyan_coins >= 3:
                         player.cyan_coins = 0
                         player.spread_shot = max(player.spread_shot, 600)
+                        SND_ROBOT_POWERUP.play()
+                        _vplay(VOX_SPREAD)
+                        active_popup = PowerupPopup("SPREAD SHOT")
                 elif c.color == PURPLE:
                     player.purple_coins += 1
                     if player.purple_coins >= 3:
                         player.purple_coins = 0
                         player.wave_fire = max(player.wave_fire, 600)
+                        SND_ROBOT_POWERUP.play()
+                        _vplay(VOX_WAVE)
+                        active_popup = PowerupPopup("WAVE FIRE")
                 elif c.color == ORANGE:
                     player.orange_coins += 1
                     if player.orange_coins >= 3:
                         player.orange_coins = 0
                         player.bullet_speedup = max(player.bullet_speedup, 600)
+                        SND_ROBOT_POWERUP.play()
+                        _vplay(VOX_SPEED)
+                        active_popup = PowerupPopup("SPEED BOOST")
                 player.score += 100
         coins[:] = [c for c in coins if c.alive]
 
@@ -1307,6 +1502,11 @@ def game_loop():
 
         # HUD
         draw_hud(screen, player, camera_x, LEVEL_LENGTH)
+
+        # Powerup popup
+        if active_popup:
+            active_popup.update()
+            draw_popup(screen, active_popup)
 
         # Scanlines
         screen.blit(scanline_surf, (0, 0))
