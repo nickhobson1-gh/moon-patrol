@@ -37,8 +37,8 @@ MAGENTA = (220, 40, 180)
 BROWN   = (140, 80, 40)
 TAN     = (180, 140, 80)
 LASER_BLUE   = (20, 80, 180)
-MOON_SURFACE = (50, 50, 50)
-MOON_DARK    = (35, 35, 35)
+MOON_SURFACE = (80, 80, 80)
+MOON_DARK    = (50, 50, 50)
 MOON_SHADOW  = (14, 14, 14)
 SKY_TOP      = (5, 10, 30)
 SKY_BOT      = (1, 5, 5)
@@ -51,6 +51,9 @@ JUMP_VEL      = -10
 BULLET_SPEED  = 8
 LASER_SPEED   = BULLET_SPEED * 1.7
 ALIEN_BULLET_SPEED = 3
+SPREAD_ANGLES      = (5, -5, 10)                              # degrees for spread levels 1/2/3
+SPREAD_LABELS      = ('', 'DOUBLE SHOT', 'TRIPLE SHOT', 'QUAD SHOT')
+SPREAD_HUD_LABELS  = ('', 'x2', 'x3', 'x4')
 LEVEL_LENGTH  = 12000   # pixels of terrain to generate
 
 screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
@@ -311,6 +314,7 @@ VOX_RAPIDFIRE  = _voice('Rapid fire')
 VOX_SPREAD     = _voice('Spread shot')
 VOX_WAVE       = _voice('Wave fire')
 VOX_SPEED      = _voice('Speed boost')
+VOX_STARBURST  = _voice('Starburst')
 
 def _vplay(snd):
     """Play a VOX sound if it was generated successfully."""
@@ -402,7 +406,24 @@ ALIEN_SURF_R = build_alien_surf(RED)
 ALIEN_SURF_P = build_alien_surf(PURPLE)
 ALIEN_SURF_C = build_alien_surf(CYAN)
 ALIEN_SURF_O = build_alien_surf(ORANGE)
-ALIEN_SURFS = [ALIEN_SURF_R, ALIEN_SURF_P, ALIEN_SURF_C, ALIEN_SURF_O]
+ALIEN_SURF_G = build_alien_surf(GREEN)
+ALIEN_SURFS = [ALIEN_SURF_R, ALIEN_SURF_P, ALIEN_SURF_C, ALIEN_SURF_O, ALIEN_SURF_G]
+
+def _load_sprite(filename, height, colorkey=(0, 0, 0)):
+    """Load, scale to *height* (preserving aspect), and apply colorkey. Returns None on failure."""
+    try:
+        raw = pygame.image.load(os.path.join(os.path.dirname(__file__), filename)).convert()
+        raw.set_colorkey(colorkey)
+        w = int(raw.get_width() * height / raw.get_height())
+        surf = pygame.transform.smoothscale(raw, (w, height))
+        surf.set_colorkey(colorkey)
+        return surf
+    except Exception:
+        return None
+
+_BASE_H = ALIEN_SURF_R.get_height()
+HOVERER_SURF = _load_sprite('space_invader.png', int(_BASE_H * 1.5))
+SAUCER_SURF  = _load_sprite('flying_saucer.png', int(_BASE_H * 2))
 
 # ─────────────────────────────────────────────
 # EXPLOSION PARTICLE
@@ -450,14 +471,12 @@ for _y in range(TERRAIN_GROUND_Y):
     pygame.draw.line(_SKY_SURF, (_r, _g, _b), (0, _y), (SCREEN_W, _y))
 
 # Background image — scaled to screen height, tiled horizontally, scrolls at 20% parallax
-_BG_IMG_PATH = os.path.join(os.path.dirname(__file__), 'moon_background.png')
+_BG_IMG_PATH = os.path.join(os.path.dirname(__file__), 'oon_background.png')
 try:
     _bg_raw = pygame.image.load(_BG_IMG_PATH).convert()
-    _bg_raw.set_colorkey((0, 0, 0))
     _bg_aspect = _bg_raw.get_width() / _bg_raw.get_height()
     _BG_TILE_W = max(SCREEN_W, int(TERRAIN_GROUND_Y * _bg_aspect))
     _BG_SURF = pygame.transform.smoothscale(_bg_raw, (_BG_TILE_W, TERRAIN_GROUND_Y))
-    _BG_SURF.set_colorkey((0, 0, 0))
 except Exception:
     _BG_SURF = None
     _BG_TILE_W = SCREEN_W
@@ -475,7 +494,7 @@ class Bullet:
         self.owner = owner
         self.alive = True
         self.w, self.h = 6, 3
-        self.max_trail = 18 if owner == 'player' else 0
+        self.max_trail = 9 if owner == 'player' else 0
         self.trail = deque(maxlen=self.max_trail) if self.max_trail else []
 
     def update(self):
@@ -522,7 +541,7 @@ class Bomb:
         self.w, self.h = 6, 8
 
     def update(self, terrain_heights, camera_x):
-        self.vy += GRAVITY * 0.4
+        self.vy += GRAVITY * 0.2
         self.x += self.vx
         self.y += self.vy
         # Check ground collision
@@ -538,6 +557,64 @@ class Bomb:
         pygame.draw.ellipse(surf, ORANGE, (int(self.x), int(self.y), self.w, self.h))
         pygame.draw.line(surf, YELLOW, (int(self.x)+3, int(self.y)),
                          (int(self.x)+3, int(self.y)-5), 2)
+
+class Submunition:
+    def __init__(self, x, y, angle):
+        spd = 4.0
+        self.x = float(x);  self.y = float(y)
+        self.vx = math.cos(angle) * spd
+        self.vy = math.sin(angle) * spd
+        self.alive = True
+        self.r = 3
+
+    def update(self, terrain_heights, camera_x):
+        self.vy += GRAVITY * 0.12   # gentle gravity
+        self.x += self.vx
+        self.y += self.vy
+        if self.x < -20 or self.x > SCREEN_W + 20 or self.y > SCREEN_H + 20:
+            self.alive = False
+            return
+        ti = max(0, min(int((self.x + camera_x) / TERRAIN_RESOLUTION),
+                        len(terrain_heights) - 1))
+        if self.y + self.r >= terrain_heights[ti]:
+            self.alive = False
+
+    def draw(self, surf):
+        pygame.draw.circle(surf, GREEN,           (int(self.x), int(self.y)), self.r)
+        pygame.draw.circle(surf, (160, 255, 160), (int(self.x), int(self.y)), 1)
+
+
+class StarburstShot:
+    TRAVEL = 200.0
+    SPD    = 5.0
+
+    def __init__(self, x, y, ndx, ndy):
+        self.x  = float(x);  self.y  = float(y)
+        self.vx = ndx * self.SPD
+        self.vy = ndy * self.SPD
+        self.dist = 0.0
+        self.alive = True
+
+    def update(self):
+        """Advance position. Returns True if this frame caused an explosion."""
+        self.x += self.vx
+        self.y += self.vy
+        self.dist += self.SPD
+        if self.dist >= self.TRAVEL:
+            self.alive = False
+            return True
+        if self.x < -50 or self.x > SCREEN_W + 50 or self.y < -50 or self.y > SCREEN_H + 50:
+            self.alive = False
+        return False
+
+    def spawn_submunitions(self):
+        return [Submunition(self.x, self.y, 2 * math.pi * i / 16) for i in range(16)]
+
+    def draw(self, surf):
+        pygame.draw.circle(surf, (200, 255, 200), (int(self.x), int(self.y)), 7)
+        pygame.draw.circle(surf, GREEN,           (int(self.x), int(self.y)), 4)
+        pygame.draw.circle(surf, (100, 220, 100), (int(self.x), int(self.y)), 2)
+
 
 class Coin:
     def __init__(self, world_x, world_y, color):
@@ -649,8 +726,8 @@ class Wave:
 
 
 class Alien:
-    TYPES = ['swooper', 'hoverer', 'diver']
-    _COLORS = [RED, PURPLE, CYAN, ORANGE]
+    TYPES = ['swooper', 'hoverer', 'diver', 'flying_saucer']
+    _COLORS = [RED, PURPLE, CYAN, ORANGE, GREEN]
 
     def __init__(self, screen_x, world_x):
         self.world_x = world_x
@@ -658,29 +735,38 @@ class Alien:
         self.y = random.randint(80, 200)
         self.type = random.choice(self.TYPES)
         color_idx = random.randint(0, len(self._COLORS) - 1)
-        self.surf = ALIEN_SURFS[color_idx]
         self.coin_color = self._COLORS[color_idx]
+        if self.type == 'hoverer' and HOVERER_SURF is not None:
+            self.surf = HOVERER_SURF
+        elif self.type == 'flying_saucer' and SAUCER_SURF is not None:
+            self.surf = SAUCER_SURF
+        else:
+            self.surf = ALIEN_SURFS[color_idx]
         self.w = self.surf.get_width()
         self.h = self.surf.get_height()
         self.alive = True
-        self.hp = 2
+        self.hp = 3 if self.type == 'flying_saucer' else 2
         self.shoot_timer = random.randint(120, 360)
         self.bomb_timer = random.randint(180, 480)
         self.anim_t = random.uniform(0, 100)
         # Movement
-        self.vx = random.uniform(-1.5, -0.5) * 0.7
+        if self.type == 'flying_saucer':
+            self.vx = random.uniform(-0.6, -0.3)   # slow horizontal drift
+        else:
+            self.vx = random.uniform(-1.5, -0.5) * 0.7
         self.base_y = self.y
         self.flash_timer = 0
 
     def update(self, bullets, bombs, player_screen_x, player_y, camera_x):
         self.anim_t += 0.05
-        # Hovering motion
+        # Vertical motion (flying_saucer stays level)
         if self.type == 'hoverer':
             self.y = self.base_y + math.sin(self.anim_t) * 30
         elif self.type == 'swooper':
             self.y = self.base_y + math.sin(self.anim_t * 1.5) * 60
         elif self.type == 'diver':
             self.y = self.base_y + abs(math.sin(self.anim_t * 0.8)) * 80
+        # flying_saucer: y unchanged — flies level
 
         self.screen_x += self.vx - SCROLL_SPEED * 0.5
         if self.screen_x < -100:
@@ -739,13 +825,14 @@ class Player:
         self.tilt = 0.0  # body tilt angle
         self.fire_rate_boost = 0  # frames remaining for rapid-fire
         self.spread_shot = 0     # frames remaining for spread shot
+        self.spread_level = 0    # 1=double, 2=triple, 3=quad
         self.cyan_coins = 0      # cyan coins collected toward next spread activation
         self.purple_coins = 0   # purple coins collected toward wave fire
         self.wave_fire = 0      # frames remaining for wave fire powerup
         self.orange_coins = 0   # orange coins collected toward bullet speedup
         self.bullet_speedup = 0 # frames remaining for bullet speedup powerup
-        self.dead = False
-        self.dead_timer = 0
+        self.green_coins = 0    # green coins collected toward starburst
+        self.starburst = 0      # frames remaining for starburst powerup
 
     def get_ground_y(self, terrain_heights, camera_x):
         """Get ground y under player center."""
@@ -761,11 +848,7 @@ class Player:
         idx = max(0, min(idx, len(terrain_heights)-1))
         return terrain_heights[idx]
 
-    def update(self, keys, terrain_heights, camera_x, bullets, waves):
-        if self.dead:
-            self.dead_timer -= 1
-            return
-
+    def update(self, keys, terrain_heights, camera_x, bullets, waves, starbursts):
         if self.invincible > 0:
             self.invincible -= 1
 
@@ -818,10 +901,14 @@ class Player:
             self.fire_rate_boost -= 1
         if self.spread_shot > 0:
             self.spread_shot -= 1
+            if self.spread_shot == 0:
+                self.spread_level = 0
         if self.wave_fire > 0:
             self.wave_fire -= 1
         if self.bullet_speedup > 0:
             self.bullet_speedup -= 1
+        if self.starburst > 0:
+            self.starburst -= 1
         shoot_cd = 13 if self.fire_rate_boost > 0 else 18
         if (keys[pygame.K_LCTRL] or keys[pygame.K_z] or keys[pygame.K_x]) and self.shoot_cooldown <= 0:
             self.shoot_cooldown = shoot_cd
@@ -834,19 +921,25 @@ class Player:
             ndx, ndy = dx / dist, dy / dist
             bx = tx + ndx * GUN_LENGTH
             by = ty + ndy * GUN_LENGTH
-            spd = LASER_SPEED * 2 if self.bullet_speedup > 0 else LASER_SPEED
-            bullets.append(Bullet(bx, by, ndx * spd, ndy * spd, LASER_BLUE, 'player'))
-            if self.spread_shot > 0:
-                a = math.radians(5)
-                ca, sa = math.cos(a), math.sin(a)
-                bullets.append(Bullet(bx, by,
-                                      (ndx * ca - ndy * sa) * spd,
-                                      (ndx * sa + ndy * ca) * spd,
-                                      LASER_BLUE, 'player'))
-            if self.wave_fire > 0 and len(waves) < 2:
-                waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
-                SND_WAVE.play()
-            SND_SHOOT.play()
+            self._fire_shot(ndx, ndy, bx, by, bullets, waves, starbursts)
+
+    def _fire_shot(self, ndx, ndy, bx, by, bullets, waves, starbursts):
+        """Spawn bullets, spread, wave and starburst for one shot."""
+        spd = LASER_SPEED * 2 if self.bullet_speedup > 0 else LASER_SPEED
+        bullets.append(Bullet(bx, by, ndx * spd, ndy * spd, LASER_BLUE, 'player'))
+        for _deg in SPREAD_ANGLES[:self.spread_level]:
+            _a = math.radians(_deg)
+            _ca, _sa = math.cos(_a), math.sin(_a)
+            bullets.append(Bullet(bx, by,
+                                  (ndx * _ca - ndy * _sa) * spd,
+                                  (ndx * _sa + ndy * _ca) * spd,
+                                  LASER_BLUE, 'player'))
+        if self.wave_fire > 0 and len(waves) < 2:
+            waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
+            SND_WAVE.play()
+        if self.starburst > 0:
+            starbursts.append(StarburstShot(bx, by, ndx, ndy))
+        SND_SHOOT.play()
 
     def hit(self):
         if self.invincible > 0:
@@ -857,9 +950,6 @@ class Player:
         return True
 
     def draw(self, surf):
-        if self.dead:
-            return
-
         # Blink when invincible
         if self.invincible > 0 and (self.invincible // 6) % 2 == 0:
             return
@@ -1123,7 +1213,7 @@ def draw_hud(surf, player, camera_x, level_length):
     # Spread-shot indicator / cyan coin progress
     if player.spread_shot > 0:
         secs = math.ceil(player.spread_shot / 60)
-        surf.blit(FONT_TINY.render(f"SPREAD  {secs}s", True, CYAN), (SCREEN_W - 160, 22))
+        surf.blit(FONT_TINY.render(f"SPREAD {SPREAD_HUD_LABELS[player.spread_level]}  {secs}s", True, CYAN), (SCREEN_W - 160, 22))
     elif player.cyan_coins > 0:
         surf.blit(FONT_TINY.render(f"SPREAD  {'o' * player.cyan_coins}{'.' * (3 - player.cyan_coins)}", True, CYAN), (SCREEN_W - 160, 22))
 
@@ -1140,6 +1230,13 @@ def draw_hud(surf, player, camera_x, level_length):
         surf.blit(FONT_TINY.render(f"SPD X2  {secs}s", True, ORANGE), (SCREEN_W - 160, 50))
     elif player.orange_coins > 0:
         surf.blit(FONT_TINY.render(f"SPD X2  {'o' * player.orange_coins}{'.' * (3 - player.orange_coins)}", True, ORANGE), (SCREEN_W - 160, 50))
+
+    # Starburst indicator
+    if player.starburst > 0:
+        secs = math.ceil(player.starburst / 60)
+        surf.blit(FONT_TINY.render(f"STARBURST  {secs}s", True, GREEN), (SCREEN_W - 160, 64))
+    elif player.green_coins > 0:
+        surf.blit(FONT_TINY.render(f"STARBURST  {'o' * player.green_coins}{'.' * (3 - player.green_coins)}", True, GREEN), (SCREEN_W - 160, 64))
 
     # Controls reminder
     surf.blit(FONT_TINY.render("ARROWS/WASD:MOVE  SPACE:JUMP  LMB:FIRE", True, GRAY), (10, SCREEN_H - 18))
@@ -1204,6 +1301,22 @@ class AlienSpawner:
                                     camera_x + SCREEN_W + random.randint(0, 200)))
             self.spawn_timer = max(117, int((240 - self.wave * 10) * 1.3))
 
+def _kill_alien(alien, camera_x, player, coins, particles):
+    """Handle alien death: scoring, explosion particles, and coin drops."""
+    alien.alive = False
+    player.score += 500
+    SND_EXPLODE.play()
+    cx = alien.screen_x + alien.w // 2
+    cy = alien.y + alien.h // 2
+    for _ in range(20):
+        particles.append(Particle(cx, cy))
+    if alien.type == 'flying_saucer':
+        for _ox in (-10, 10):
+            coins.append(Coin(cx + camera_x + _ox, cy, RED))
+    else:
+        coins.append(Coin(cx + camera_x, cy, alien.coin_color))
+
+
 # ─────────────────────────────────────────────
 # MAIN GAME LOOP
 # ─────────────────────────────────────────────
@@ -1217,6 +1330,8 @@ def game_loop():
     coins = []
     particles = []
     waves = []
+    starbursts = []
+    submunitions = []
     active_popup = None
     spawner = AlienSpawner()
 
@@ -1237,50 +1352,29 @@ def game_loop():
     _vplay(VOX_TITLE)
 
     pygame.mouse.set_visible(False)
-    mouse_held = False   # tracks left-button held state via events
-
-    def _mouse_fire():
-        """Fire a bullet toward the current mouse position (if cooldown allows)."""
-        if player.dead or show_title or game_over or won:
-            return
-        if player.shoot_cooldown > 0:
-            return
-        player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
-        mx, my = pygame.mouse.get_pos()
-        tx = player.x + VEHICLE_W // 2
-        ty = player.y + VEHICLE_H // 3
-        dx = mx - tx;  dy = my - ty
-        dist = max(1, math.sqrt(dx * dx + dy * dy))
-        ndx, ndy = dx / dist, dy / dist
-        bx = tx + ndx * GUN_LENGTH
-        by = ty + ndy * GUN_LENGTH
-        spd = LASER_SPEED * 2 if player.bullet_speedup > 0 else LASER_SPEED
-        bullets.append(Bullet(bx, by, ndx * spd, ndy * spd, LASER_BLUE, 'player'))
-        if player.spread_shot > 0:
-            a = math.radians(5)
-            ca, sa = math.cos(a), math.sin(a)
-            bullets.append(Bullet(bx, by,
-                                  (ndx * ca - ndy * sa) * spd,
-                                  (ndx * sa + ndy * ca) * spd,
-                                  LASER_BLUE, 'player'))
-        if player.wave_fire > 0 and len(waves) == 0:
-            waves.append(Wave(bx, by, math.atan2(ndy, ndx)))
-            SND_WAVE.play()
-        SND_SHOOT.play()
+    mouse_held = False       # LMB currently held
+    fire_requested = False   # set on MOUSEBUTTONDOWN, consumed by fire block
 
     running = True
     while running:
         dt = clock.tick(FPS)
         keys = pygame.key.get_pressed()
+        fire_requested = False   # reset each frame before processing events
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mouse_held = True
-                _mouse_fire()   # fire immediately on click event
+                fire_requested = True    # latch click even if released same frame
+                if show_title:           # LMB also starts the game
+                    show_title = False
+                    SND_ROBOT_START.play()
+                    _vplay(VOX_READY)
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_held = False
+            if event.type == pygame.MOUSEMOTION and event.buttons[0]:
+                mouse_held = True        # catch held-drag that missed BUTTONDOWN
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return False
@@ -1303,7 +1397,7 @@ def game_loop():
             screen.blit(t2, (SCREEN_W//2 - t2.get_width()//2, 260))
             t3 = FONT_TINY.render("ARROWS/WASD  SPACE:JUMP  LMB:FIRE", True, GRAY)
             screen.blit(t3, (SCREEN_W//2 - t3.get_width()//2, 310))
-            t4 = font_med.render("PRESS ENTER TO START", True, [WHITE,YELLOW][(title_timer//30)%2])
+            t4 = font_med.render("CLICK OR PRESS ENTER TO START", True, [WHITE,YELLOW][(title_timer//30)%2])
             screen.blit(t4, (SCREEN_W//2 - t4.get_width()//2, 380))
             screen.blit(scanline_surf, (0, 0))
             pygame.display.flip()
@@ -1336,16 +1430,25 @@ def game_loop():
         player.score = int(camera_x * 2)
 
         # Update player
-        player.update(keys, terrain_heights, camera_x, bullets, waves)
+        player.update(keys, terrain_heights, camera_x, bullets, waves, starbursts)
 
         if player.lives == 0 and not game_over:
             game_over = True
             SND_ROBOT_GAMEOVER.play()
             _vplay(VOX_GAMEOVER)
 
-        # Mouse firing toward crosshair (hold to auto-fire)
-        if mouse_held or pygame.mouse.get_pressed()[0]:
-            _mouse_fire()
+        # Mouse firing toward crosshair (click or hold)
+        if (fire_requested or mouse_held or pygame.mouse.get_pressed()[0]) and player.lives > 0 and player.shoot_cooldown <= 0:
+            player.shoot_cooldown = 13 if player.fire_rate_boost > 0 else 18
+            _mx, _my = pygame.mouse.get_pos()
+            _tx = player.x + VEHICLE_W // 2
+            _ty = player.y + VEHICLE_H // 3
+            _dx = _mx - _tx;  _dy = _my - _ty
+            _dist = max(1, math.sqrt(_dx * _dx + _dy * _dy))
+            _ndx, _ndy = _dx / _dist, _dy / _dist
+            _bx = _tx + _ndx * GUN_LENGTH
+            _by = _ty + _ndy * GUN_LENGTH
+            player._fire_shot(_ndx, _ndy, _bx, _by, bullets, waves, starbursts)
 
         # Check win
         finish_screen_x = FINISH_WORLD_X - camera_x
@@ -1378,7 +1481,7 @@ def game_loop():
         for b in bullets:
             if b.owner == 'alien':
                 br = pygame.Rect(b.x, b.y, b.w, b.h)
-                if player_rect.colliderect(br) and not player.dead:
+                if player_rect.colliderect(br) and player.lives > 0:
                     b.alive = False
                     player.hit()
                     for _ in range(8):
@@ -1393,23 +1496,13 @@ def game_loop():
                         alien.hp -= 1
                         alien.flash_timer = 12
                         if alien.hp <= 0:
-                            alien.alive = False
-                            player.score += 500
-                            SND_EXPLODE.play()
-                            for _ in range(20):
-                                particles.append(Particle(alien.screen_x + alien.w//2,
-                                                          alien.y + alien.h//2))
-                            for _ in range(random.randint(2, 4)):
-                                coins.append(Coin(
-                                    alien.screen_x + camera_x + alien.w//2 + random.uniform(-12, 12),
-                                    alien.y + alien.h//2,
-                                    alien.coin_color))
+                            _kill_alien(alien, camera_x, player, coins, particles)
                         break
 
         # Bomb collision with player
         for bm in bombs:
             bmr = pygame.Rect(bm.x, bm.y, bm.w, bm.h)
-            if player_rect.colliderect(bmr) and not player.dead:
+            if player_rect.colliderect(bmr) and player.lives > 0:
                 bm.alive = False
                 player.hit()
                 for _ in range(12):
@@ -1424,7 +1517,7 @@ def game_loop():
             if c.alive and player_rect.colliderect(cr):
                 c.alive = False
                 if c.color == RED:
-                    player.fire_rate_boost = max(player.fire_rate_boost, 600)
+                    player.fire_rate_boost = max(player.fire_rate_boost, 1200)
                     SND_ROBOT_POWERUP.play()
                     _vplay(VOX_RAPIDFIRE)
                     active_popup = PowerupPopup("RAPID FIRE")
@@ -1432,15 +1525,16 @@ def game_loop():
                     player.cyan_coins += 1
                     if player.cyan_coins >= 3:
                         player.cyan_coins = 0
-                        player.spread_shot = max(player.spread_shot, 600)
+                        player.spread_level = min(3, player.spread_level + 1)
+                        player.spread_shot = 1200
                         SND_ROBOT_POWERUP.play()
                         _vplay(VOX_SPREAD)
-                        active_popup = PowerupPopup("SPREAD SHOT")
+                        active_popup = PowerupPopup(SPREAD_LABELS[player.spread_level])
                 elif c.color == PURPLE:
                     player.purple_coins += 1
                     if player.purple_coins >= 3:
                         player.purple_coins = 0
-                        player.wave_fire = max(player.wave_fire, 600)
+                        player.wave_fire = max(player.wave_fire, 1200)
                         SND_ROBOT_POWERUP.play()
                         _vplay(VOX_WAVE)
                         active_popup = PowerupPopup("WAVE FIRE")
@@ -1448,10 +1542,18 @@ def game_loop():
                     player.orange_coins += 1
                     if player.orange_coins >= 3:
                         player.orange_coins = 0
-                        player.bullet_speedup = max(player.bullet_speedup, 600)
+                        player.bullet_speedup = max(player.bullet_speedup, 1200)
                         SND_ROBOT_POWERUP.play()
                         _vplay(VOX_SPEED)
                         active_popup = PowerupPopup("SPEED BOOST")
+                elif c.color == GREEN:
+                    player.green_coins += 1
+                    if player.green_coins >= 3:
+                        player.green_coins = 0
+                        player.starburst = max(player.starburst, 1200)
+                        SND_ROBOT_POWERUP.play()
+                        _vplay(VOX_STARBURST)
+                        active_popup = PowerupPopup("STARBURST")
                 player.score += 100
         coins[:] = [c for c in coins if c.alive]
 
@@ -1463,18 +1565,32 @@ def game_loop():
                 if alien.alive and w.hits_alien(alien):
                     alien.hp -= 1
                     if alien.hp <= 0:
-                        alien.alive = False
-                        player.score += 500
-                        SND_EXPLODE.play()
-                        for _ in range(20):
-                            particles.append(Particle(alien.screen_x + alien.w//2,
-                                                      alien.y + alien.h//2))
-                        for _ in range(random.randint(2, 4)):
-                            coins.append(Coin(
-                                alien.screen_x + camera_x + alien.w//2 + random.uniform(-12, 12),
-                                alien.y + alien.h//2,
-                                alien.coin_color))
+                        _kill_alien(alien, camera_x, player, coins, particles)
         waves[:] = [w for w in waves if w.alive]
+
+        # Starbursts — update and spawn submunitions on explosion
+        for sb in starbursts:
+            if sb.update():
+                submunitions.extend(sb.spawn_submunitions())
+        starbursts[:] = [sb for sb in starbursts if sb.alive]
+
+        # Submunitions — update then collide with aliens (single pass)
+        for sm in submunitions:
+            sm.update(terrain_heights, camera_x)
+            if not sm.alive:
+                continue
+            sr = pygame.Rect(int(sm.x) - sm.r, int(sm.y) - sm.r, sm.r * 2, sm.r * 2)
+            for alien in aliens:
+                if not alien.alive:
+                    continue
+                if sr.colliderect(pygame.Rect(alien.screen_x, alien.y, alien.w, alien.h)):
+                    sm.alive = False
+                    alien.hp -= 2
+                    alien.flash_timer = 12
+                    if alien.hp <= 0:
+                        _kill_alien(alien, camera_x, player, coins, particles)
+                    break
+        submunitions[:] = [sm for sm in submunitions if sm.alive]
 
         # Particles
         for p in particles:
@@ -1510,6 +1626,12 @@ def game_loop():
         # Draw waves
         for w in waves:
             w.draw(screen)
+
+        # Draw starbursts and submunitions
+        for sb in starbursts:
+            sb.draw(screen)
+        for sm in submunitions:
+            sm.draw(screen)
 
         # Draw player
         player.draw(screen)
