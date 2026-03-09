@@ -54,7 +54,7 @@ ALIEN_BULLET_SPEED = 3
 SPREAD_ANGLES      = (5, -5, 10)                              # degrees for spread levels 1/2/3
 SPREAD_LABELS      = ('', 'DOUBLE SHOT', 'TRIPLE SHOT', 'QUAD SHOT')
 SPREAD_HUD_LABELS  = ('', 'x2', 'x3', 'x4')
-LEVEL_LENGTH  = 12000   # pixels of terrain to generate
+LEVEL_LENGTH  = 6000   # pixels of terrain to generate
 
 screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
 pygame.display.set_caption("MOON PATROL")
@@ -454,6 +454,69 @@ class Particle:
             c = (int(self.color[0] * t), int(self.color[1] * t), int(self.color[2] * t))
             pygame.draw.rect(surf, c, (int(self.x), int(self.y), self.size, self.size))
 
+
+class MintParticle:
+    """Jeff Minter-style neon explosion particle — colour-matched to the alien."""
+    _TRAIL_LEN = 7   # positions kept for streak rendering
+
+    def __init__(self, x, y, base_color):
+        angle       = random.uniform(0, 2 * math.pi)
+        speed       = random.uniform(1.5, 14.0)
+        self.x      = float(x);  self.y  = float(y)
+        self.vx     = math.cos(angle) * speed
+        self.vy     = math.sin(angle) * speed - random.uniform(0, 4)
+        self.life     = random.randint(18, 38)
+        self.max_life = self.life
+        self.color    = base_color
+        self.bright   = tuple(min(255, c + 140) for c in base_color)
+        self.size     = random.choices([2, 3, 4, 5, 6], weights=[3, 4, 4, 2, 1])[0]
+        self.trail    = [(self.x, self.y)]  # history for neon streak
+
+    def update(self):
+        self.trail.append((self.x, self.y))
+        if len(self.trail) > self._TRAIL_LEN:
+            self.trail.pop(0)
+        self.vx *= 0.89
+        self.vy   = self.vy * 0.89 + 0.22
+        self.x   += self.vx
+        self.y   += self.vy
+        self.life -= 1
+
+    def draw(self, surf):
+        if self.life <= 0:
+            return
+        t  = self.life / self.max_life
+        cx, cy = int(self.x), int(self.y)
+
+        # Multi-segment neon trail — older points dimmer
+        n = len(self.trail)
+        for i, (tx, ty) in enumerate(self.trail):
+            seg_t = (i / n) * t * 0.65
+            seg_c = tuple(int(c * seg_t) for c in self.bright)
+            if any(seg_c):
+                w = 1 if i < n // 2 else 2
+                pygame.draw.line(surf, seg_c,
+                                 (int(tx), int(ty)), (cx, cy), w)
+
+        # Outer glow halos (concentric dim circles)
+        for radius, alpha in ((self.size + 5, 0.12), (self.size + 2, 0.22)):
+            gc = tuple(int(c * t * alpha) for c in self.bright)
+            if any(gc):
+                pygame.draw.circle(surf, gc, (cx, cy), radius)
+
+        # Main pixel block
+        col = tuple(int(c * t) for c in self.color)
+        if any(col):
+            pygame.draw.rect(surf, col, (cx - self.size // 2, cy - self.size // 2,
+                                         self.size, self.size))
+
+        # Bright core while hot
+        if t > 0.45:
+            core = self.size // 2 + 1
+            pygame.draw.rect(surf, self.bright,
+                             (cx - core // 2, cy - core // 2, core, core))
+
+
 # ─────────────────────────────────────────────
 # STAR FIELD
 # ─────────────────────────────────────────────
@@ -535,13 +598,13 @@ class Bomb:
     def __init__(self, x, y):
         self.x = x
         self.y = y
-        self.vx = random.uniform(-1, 1)
+        self.vx = random.uniform(-0.7, 0.7)  # 30% slower horizontal drift
         self.vy = 0
         self.alive = True
         self.w, self.h = 6, 8
 
     def update(self, terrain_heights, camera_x):
-        self.vy += GRAVITY * 0.2
+        self.vy += GRAVITY * 0.14       # 30% slower fall
         self.x += self.vx
         self.y += self.vy
         # Check ground collision
@@ -823,16 +886,12 @@ class Player:
         # Track contact offsets (front and rear)
         self.wheel_offsets = [(6, VEHICLE_H - 4), (VEHICLE_W - 11, VEHICLE_H - 4)]
         self.tilt = 0.0  # body tilt angle
-        self.fire_rate_boost = 0  # frames remaining for rapid-fire
-        self.spread_shot = 0     # frames remaining for spread shot
-        self.spread_level = 0    # 1=double, 2=triple, 3=quad
-        self.cyan_coins = 0      # cyan coins collected toward next spread activation
-        self.purple_coins = 0   # purple coins collected toward wave fire
-        self.wave_fire = 0      # frames remaining for wave fire powerup
-        self.orange_coins = 0   # orange coins collected toward bullet speedup
-        self.bullet_speedup = 0 # frames remaining for bullet speedup powerup
-        self.green_coins = 0    # green coins collected toward starburst
-        self.starburst = 0      # frames remaining for starburst powerup
+        self.fire_rate_boost = 0  # 1 = rapid-fire active
+        self.spread_level = 0     # 1=double, 2=triple, 3=quad
+        self.wave_fire = 0        # 1 = wave fire active
+        self.bullet_speedup = 0   # 1 = bullet speedup active
+        self.starburst = 0        # 1 = starburst active
+        self.coins = 0            # coins collected this level
 
     def get_ground_y(self, terrain_heights, camera_x):
         """Get ground y under player center."""
@@ -897,18 +956,6 @@ class Player:
 
         # Shoot (up-right)
         self.shoot_cooldown -= 1
-        if self.fire_rate_boost > 0:
-            self.fire_rate_boost -= 1
-        if self.spread_shot > 0:
-            self.spread_shot -= 1
-            if self.spread_shot == 0:
-                self.spread_level = 0
-        if self.wave_fire > 0:
-            self.wave_fire -= 1
-        if self.bullet_speedup > 0:
-            self.bullet_speedup -= 1
-        if self.starburst > 0:
-            self.starburst -= 1
         shoot_cd = 13 if self.fire_rate_boost > 0 else 18
         if (keys[pygame.K_LCTRL] or keys[pygame.K_z] or keys[pygame.K_x]
                 or pygame.mouse.get_pressed()[0]) and self.shoot_cooldown <= 0:
@@ -1193,9 +1240,10 @@ def draw_popup(surf, popup):
 # ─────────────────────────────────────────────
 # HUD
 # ─────────────────────────────────────────────
-def draw_hud(surf, player, camera_x, level_length):
+def draw_hud(surf, player, camera_x, level_length, level=1):
     surf.blit(FONT_SM.render(f"SCORE: {player.score:06d}", True, YELLOW), (10, 8))
     surf.blit(FONT_SM.render(f"LIVES: {'* ' * player.lives}", True, CYAN), (10, 26))
+    surf.blit(FONT_SM.render(f"LEVEL: {level}", True, WHITE), (10, 44))
 
     # Progress bar
     progress = min(1.0, camera_x / (level_length - SCREEN_W))
@@ -1206,38 +1254,21 @@ def draw_hud(surf, player, camera_x, level_length):
     pygame.draw.rect(surf, WHITE, (bar_x, 10, bar_w, 10), 1)
     surf.blit(FONT_TINY.render("CHECKPOINT", True, WHITE), (bar_x + bar_w + 8, 8))
 
-    # Rapid-fire indicator
-    if player.fire_rate_boost > 0:
-        secs = math.ceil(player.fire_rate_boost / 60)
-        surf.blit(FONT_TINY.render(f"RAPID FIRE  {secs}s", True, RED), (SCREEN_W - 160, 8))
+    # Coin count
+    surf.blit(FONT_TINY.render(f"COINS: {player.coins}", True, YELLOW), (SCREEN_W - 100, 8))
 
-    # Spread-shot indicator / cyan coin progress
-    if player.spread_shot > 0:
-        secs = math.ceil(player.spread_shot / 60)
-        surf.blit(FONT_TINY.render(f"SPREAD {SPREAD_HUD_LABELS[player.spread_level]}  {secs}s", True, CYAN), (SCREEN_W - 160, 22))
-    elif player.cyan_coins > 0:
-        surf.blit(FONT_TINY.render(f"SPREAD  {'o' * player.cyan_coins}{'.' * (3 - player.cyan_coins)}", True, CYAN), (SCREEN_W - 160, 22))
-
-    # Wave fire indicator
-    if player.wave_fire > 0:
-        secs = math.ceil(player.wave_fire / 60)
-        surf.blit(FONT_TINY.render(f"WAVE FIRE  {secs}s", True, PURPLE), (SCREEN_W - 160, 36))
-    elif player.purple_coins > 0:
-        surf.blit(FONT_TINY.render(f"WAVE  {'o' * player.purple_coins}{'.' * (3 - player.purple_coins)}", True, PURPLE), (SCREEN_W - 160, 36))
-
-    # Bullet speedup indicator
-    if player.bullet_speedup > 0:
-        secs = math.ceil(player.bullet_speedup / 60)
-        surf.blit(FONT_TINY.render(f"SPD X2  {secs}s", True, ORANGE), (SCREEN_W - 160, 50))
-    elif player.orange_coins > 0:
-        surf.blit(FONT_TINY.render(f"SPD X2  {'o' * player.orange_coins}{'.' * (3 - player.orange_coins)}", True, ORANGE), (SCREEN_W - 160, 50))
-
-    # Starburst indicator
-    if player.starburst > 0:
-        secs = math.ceil(player.starburst / 60)
-        surf.blit(FONT_TINY.render(f"STARBURST  {secs}s", True, GREEN), (SCREEN_W - 160, 64))
-    elif player.green_coins > 0:
-        surf.blit(FONT_TINY.render(f"STARBURST  {'o' * player.green_coins}{'.' * (3 - player.green_coins)}", True, GREEN), (SCREEN_W - 160, 64))
+    # Active upgrade indicators (permanent — no countdown)
+    _hy = 22
+    if player.fire_rate_boost:
+        surf.blit(FONT_TINY.render("RAPID FIRE", True, RED),    (SCREEN_W - 100, _hy)); _hy += 14
+    if player.spread_level:
+        surf.blit(FONT_TINY.render(f"SPREAD {SPREAD_HUD_LABELS[player.spread_level]}", True, CYAN),   (SCREEN_W - 100, _hy)); _hy += 14
+    if player.wave_fire:
+        surf.blit(FONT_TINY.render("WAVE FIRE",  True, PURPLE), (SCREEN_W - 100, _hy)); _hy += 14
+    if player.bullet_speedup:
+        surf.blit(FONT_TINY.render("SPD X2",     True, ORANGE), (SCREEN_W - 100, _hy)); _hy += 14
+    if player.starburst:
+        surf.blit(FONT_TINY.render("STARBURST",  True, GREEN),  (SCREEN_W - 100, _hy))
 
     # Controls reminder
     surf.blit(FONT_TINY.render("ARROWS/WASD:MOVE  SPACE:JUMP  LMB:FIRE", True, GRAY), (10, SCREEN_H - 18))
@@ -1288,16 +1319,18 @@ def draw_finish(surf, finish_screen_x, terrain_heights, camera_x):
 # ALIEN SPAWNER
 # ─────────────────────────────────────────────
 class AlienSpawner:
-    def __init__(self):
+    def __init__(self, level=1):
         self.spawn_timer = 234  # 180 * 1.3
         self.wave = 0
+        # Each level adds 20% more aliens (multiplicative)
+        self.alien_mult = 1.0 + 0.2 * (level - 1)
 
     def update(self, aliens, camera_x):
         self.spawn_timer -= 1
         if self.spawn_timer <= 0:
             self.wave += 1
-            count = 1 + self.wave // 3
-            for _ in range(min(count, 3)):
+            count = max(1, int((1 + self.wave // 3) * self.alien_mult))
+            for _ in range(min(count, 6)):
                 aliens.append(Alien(SCREEN_W + random.randint(0, 100),
                                     camera_x + SCREEN_W + random.randint(0, 200)))
             self.spawn_timer = max(117, int((240 - self.wave * 10) * 1.3))
@@ -1309,8 +1342,13 @@ def _kill_alien(alien, camera_x, player, coins, particles):
     SND_EXPLODE.play()
     cx = alien.screen_x + alien.w // 2
     cy = alien.y + alien.h // 2
-    for _ in range(20):
-        particles.append(Particle(cx, cy))
+    explosion_color = RED if alien.type == 'flying_saucer' else alien.coin_color
+    # 40 neon Minter-style shrapnel in the alien's colour
+    for _ in range(40):
+        particles.append(MintParticle(cx, cy, explosion_color))
+    # 6 white-hot flash pixels for the initial pop
+    for _ in range(6):
+        particles.append(MintParticle(cx, cy, WHITE))
     if alien.type == 'flying_saucer':
         for _ox in (-10, 10):
             coins.append(Coin(cx + camera_x + _ox, cy, RED))
@@ -1319,11 +1357,106 @@ def _kill_alien(alien, camera_x, player, coins, particles):
 
 
 # ─────────────────────────────────────────────
+# END-OF-LEVEL UPGRADE SHOP
+# ─────────────────────────────────────────────
+_SHOP_ITEMS = [
+    # (key_char, display_name, player_attr, cost, color)
+    ('1', 'RAPID FIRE',     'fire_rate_boost', 10,  RED),
+    ('2', 'BULLET SPEEDUP', 'bullet_speedup',  20,  ORANGE),
+    ('3', 'DOUBLE SHOT',    'spread_level',    30,  CYAN),
+    ('4', 'WAVE FIRE',      'wave_fire',       40,  PURPLE),
+    ('5', 'STARBURST',      'starburst',       50,  GREEN),
+]
+_SHOP_KEYS = {
+    pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2,
+    pygame.K_4: 3, pygame.K_5: 4,
+}
+
+def run_shop(screen, player, scanline_surf, level=1):
+    """Blocking upgrade shop shown at end of level. Returns False to quit."""
+    clock = pygame.time.Clock()
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return False
+                if event.key in (pygame.K_RETURN, pygame.K_r):
+                    return True
+                if event.key in _SHOP_KEYS:
+                    _, _, attr, cost, _ = _SHOP_ITEMS[_SHOP_KEYS[event.key]]
+                    if player.coins >= cost:
+                        if attr == 'spread_level':
+                            if player.spread_level < 3:
+                                player.coins -= cost
+                                player.spread_level += 1
+                                SND_ROBOT_POWERUP.play()
+                        elif not getattr(player, attr):
+                            player.coins -= cost
+                            setattr(player, attr, 1)
+                            SND_ROBOT_POWERUP.play()
+
+        # Draw shop
+        screen.fill(BLACK)
+        title = FONT_LG.render(f"LEVEL {level} COMPLETE", True, YELLOW)
+        screen.blit(title, (SCREEN_W // 2 - title.get_width() // 2, 35))
+
+        coins_surf = FONT_MD.render(f"COINS: {player.coins}", True, YELLOW)
+        screen.blit(coins_surf, (SCREEN_W // 2 - coins_surf.get_width() // 2, 95))
+
+        for i, (key, name, attr, cost, color) in enumerate(_SHOP_ITEMS):
+            y = 155 + i * 48
+            if attr == 'spread_level':
+                level = player.spread_level
+                if level >= 3:
+                    status, dim = "MAX", True
+                    label = f"[{key}] {name}  ({SPREAD_LABELS[3]})  {cost} coins"
+                else:
+                    can_buy = player.coins >= cost
+                    status = "[BUY]" if can_buy else "LOW COINS"
+                    dim = not can_buy
+                    next_label = SPREAD_LABELS[level + 1] if level < 3 else ""
+                    label = f"[{key}] {name}  ({next_label})  {cost} coins  {status}"
+            else:
+                owned = bool(getattr(player, attr))
+                if owned:
+                    status, dim = "OWNED", True
+                else:
+                    can_buy = player.coins >= cost
+                    status = "[BUY]" if can_buy else "LOW COINS"
+                    dim = not can_buy
+                label = f"[{key}] {name}  {cost} coins  {status}"
+
+            col = DKGRAY if dim else color
+            surf = FONT_SM.render(label, True, col)
+            screen.blit(surf, (SCREEN_W // 2 - surf.get_width() // 2, y))
+
+        cont = FONT_MD.render("ENTER / R  TO CONTINUE", True, GRAY)
+        screen.blit(cont, (SCREEN_W // 2 - cont.get_width() // 2, SCREEN_H - 70))
+        screen.blit(scanline_surf, (0, 0))
+        pygame.display.flip()
+        clock.tick(60)
+
+
+# ─────────────────────────────────────────────
 # MAIN GAME LOOP
 # ─────────────────────────────────────────────
-def game_loop():
-    terrain_heights = generate_terrain(LEVEL_LENGTH + SCREEN_W * 2)
+def game_loop(saved_upgrades=None):
+    su = saved_upgrades or {}
+    level       = su.get('level', 1)
+    level_length = LEVEL_LENGTH + (level - 1) * 1000
+
+    terrain_heights = generate_terrain(level_length + SCREEN_W * 2)
     player = Player()
+    # Restore upgrades carried over from a previous level
+    player.fire_rate_boost = su.get('fire_rate_boost', 0)
+    player.spread_level    = su.get('spread_level',    0)
+    player.wave_fire       = su.get('wave_fire',       0)
+    player.bullet_speedup  = su.get('bullet_speedup',  0)
+    player.starburst       = su.get('starburst',       0)
+    player.coins           = su.get('coins',           0)
+
     camera_x = 0.0
     bullets = []
     bombs = []
@@ -1333,10 +1466,9 @@ def game_loop():
     waves = []
     starbursts = []
     submunitions = []
-    active_popup = None
-    spawner = AlienSpawner()
+    spawner = AlienSpawner(level)
 
-    FINISH_WORLD_X = LEVEL_LENGTH - 200
+    FINISH_WORLD_X = level_length - 200
     won = False
     game_over = False
 
@@ -1360,7 +1492,7 @@ def game_loop():
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                return False
+                return False, None
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if show_title:           # LMB also starts the game
                     show_title = False
@@ -1368,9 +1500,9 @@ def game_loop():
                     _vplay(VOX_READY)
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    return False
-                if event.key == pygame.K_r and (game_over or won):
-                    return True  # restart
+                    return False, None
+                if event.key == pygame.K_r and game_over:
+                    return True, None   # restart without upgrades after game over
                 if event.key == pygame.K_RETURN and show_title:
                     show_title = False
                     SND_ROBOT_START.play()
@@ -1394,18 +1526,28 @@ def game_loop():
             pygame.display.flip()
             continue
 
-        if game_over or won:
+        if won:
+            # Show upgrade shop; carry upgrades into next level
+            ok = run_shop(screen, player, scanline_surf, level)
+            if not ok:
+                return False, None
+            upgrades = {
+                'level':           level + 1,
+                'fire_rate_boost': player.fire_rate_boost,
+                'spread_level':    player.spread_level,
+                'wave_fire':       player.wave_fire,
+                'bullet_speedup':  player.bullet_speedup,
+                'starburst':       player.starburst,
+                'coins':           player.coins,
+            }
+            return True, upgrades
+
+        if game_over:
             screen.fill(BLACK)
-            if won:
-                msg = font_big.render("YOU WIN!", True, YELLOW)
-                sc = font_med.render(f"SCORE: {player.score:06d}", True, CYAN)
-                screen.blit(msg, (SCREEN_W//2 - msg.get_width()//2, 220))
-                screen.blit(sc, (SCREEN_W//2 - sc.get_width()//2, 300))
-            else:
-                msg = font_big.render("GAME OVER", True, RED)
-                sc = font_med.render(f"SCORE: {player.score:06d}", True, WHITE)
-                screen.blit(msg, (SCREEN_W//2 - msg.get_width()//2, 220))
-                screen.blit(sc, (SCREEN_W//2 - sc.get_width()//2, 300))
+            msg = font_big.render("GAME OVER", True, RED)
+            sc = font_med.render(f"SCORE: {player.score:06d}", True, WHITE)
+            screen.blit(msg, (SCREEN_W//2 - msg.get_width()//2, 220))
+            screen.blit(sc, (SCREEN_W//2 - sc.get_width()//2, 300))
             restart = font_med.render("PRESS R TO RESTART", True, GRAY)
             screen.blit(restart, (SCREEN_W//2 - restart.get_width()//2, 380))
             screen.blit(scanline_surf, (0, 0))
@@ -1495,44 +1637,7 @@ def game_loop():
             cr = pygame.Rect(c.world_x - camera_x - c.r, c.world_y - c.r, c.r * 2, c.r * 2)
             if c.alive and player_rect.colliderect(cr):
                 c.alive = False
-                if c.color == RED:
-                    player.fire_rate_boost = max(player.fire_rate_boost, 1200)
-                    SND_ROBOT_POWERUP.play()
-                    _vplay(VOX_RAPIDFIRE)
-                    active_popup = PowerupPopup("RAPID FIRE")
-                elif c.color == CYAN:
-                    player.cyan_coins += 1
-                    if player.cyan_coins >= 3:
-                        player.cyan_coins = 0
-                        player.spread_level = min(3, player.spread_level + 1)
-                        player.spread_shot = 1200
-                        SND_ROBOT_POWERUP.play()
-                        _vplay(VOX_SPREAD)
-                        active_popup = PowerupPopup(SPREAD_LABELS[player.spread_level])
-                elif c.color == PURPLE:
-                    player.purple_coins += 1
-                    if player.purple_coins >= 3:
-                        player.purple_coins = 0
-                        player.wave_fire = max(player.wave_fire, 1200)
-                        SND_ROBOT_POWERUP.play()
-                        _vplay(VOX_WAVE)
-                        active_popup = PowerupPopup("WAVE FIRE")
-                elif c.color == ORANGE:
-                    player.orange_coins += 1
-                    if player.orange_coins >= 3:
-                        player.orange_coins = 0
-                        player.bullet_speedup = max(player.bullet_speedup, 1200)
-                        SND_ROBOT_POWERUP.play()
-                        _vplay(VOX_SPEED)
-                        active_popup = PowerupPopup("SPEED BOOST")
-                elif c.color == GREEN:
-                    player.green_coins += 1
-                    if player.green_coins >= 3:
-                        player.green_coins = 0
-                        player.starburst = max(player.starburst, 1200)
-                        SND_ROBOT_POWERUP.play()
-                        _vplay(VOX_STARBURST)
-                        active_popup = PowerupPopup("STARBURST")
+                player.coins += 1
                 player.score += 100
         coins[:] = [c for c in coins if c.alive]
 
@@ -1620,12 +1725,8 @@ def game_loop():
             p.draw(screen)
 
         # HUD
-        draw_hud(screen, player, camera_x, LEVEL_LENGTH)
+        draw_hud(screen, player, camera_x, level_length, level)
 
-        # Powerup popup
-        if active_popup:
-            active_popup.update()
-            draw_popup(screen, active_popup)
 
         # Scanlines
         screen.blit(scanline_surf, (0, 0))
@@ -1640,11 +1741,14 @@ def game_loop():
 
         pygame.display.flip()
 
-    return False
+    return False, None
 
 def main():
-    while game_loop():
-        pass
+    upgrades = None
+    while True:
+        should_restart, upgrades = game_loop(upgrades)
+        if not should_restart:
+            break
     pygame.quit()
     sys.exit()
 
